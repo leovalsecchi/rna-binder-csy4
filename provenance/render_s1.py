@@ -12,8 +12,8 @@ HERE = pathlib.Path(__file__).parent
 COLS = [
     ("role", "Stage"), ("tool", "Tool"), ("version", "Version"),
     ("commit", "Commit"), ("container", "Container image"),
-    ("image_date", "Image date"), ("weights_params", "Weights / parameters"),
-    ("config", "Configuration as run"),
+    ("image_date", "Image date"), ("sha256", "Image sha256"),
+    ("weights_params", "Weights / parameters"), ("config", "Configuration as run"),
 ]
 
 

@@ -71,12 +71,14 @@ which designs it affects.
 ## Containers
 
 Model execution was containerised (`apptainer exec --nv`). Images are 3.5–15.7 GB and
-are not in this repository; they are deposited separately and cited by digest in
-`provenance/S1.md`. Two are compromised as provenance and are labelled as such:
-`esmc.sif` was built from a `docker-archive` tar that no longer exists and has no
-surviving build recipe, and `boltz_design1.sif` is owned by another user with mode
-`-rwxr-x---`, so it cannot be inspected at all. One image in the inventory
-(`esmfold2.def`) has a complete build recipe and was never used in production.
+are not in this repository; they are deposited separately and cited by sha256 digest in
+`provenance/S1.md`. All nine production images have been hashed.
+
+Two components have no recoverable version. The Protenix distribution bundled into
+`af3_protenix_esm.sif` carries no version string anywhere, and `esmc.sif` was built from
+a `docker-archive` tar that no longer exists, so its build recipe is gone — for both,
+the image digest is the only identifier. `provenance/container_recipes/` holds the build
+recipes that do survive.
 
 ## Data
 
