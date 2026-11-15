@@ -88,6 +88,16 @@ group NAS. The assembled metric masters are 12–15 GB and are not deposited in 
 the deposited reduction is the gated design set, the 12,000-member library and the
 ordered hits. See `provenance/data_availability.md`.
 
+## Licence
+
+Code in this repository: **MIT** (`LICENSE`). Deposited data: **CC-BY-4.0**
+(`LICENSE-DATA`). Cite the thesis and, once minted, the Zenodo DOI for the data
+deposit.
+
+Third-party tools keep their own licences, and some restrict commercial use or the
+redistribution of model weights — `LICENSE` lists which. No model parameters are
+included here.
+
 ## Reproducing the analysis layer
 
 The metric and selection code *is* deterministic given the archived structures, and

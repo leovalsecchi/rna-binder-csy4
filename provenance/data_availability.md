@@ -41,3 +41,8 @@ and the masters are wide intermediate tables rather than results.
 - **The build recipe for `esmc.sif`**, whose source `docker-archive` tar was deleted.
 - **Counts of designs predating the cysteine exclusion and BoltzIF Route B**, derivable
   only from run timestamps rather than recorded directly.
+
+## Licence
+
+The deposited data is released under **CC-BY-4.0** (`LICENSE-DATA` in the repository
+root). The pipeline code is released separately under the **MIT License** (`LICENSE`).
