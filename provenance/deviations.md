@@ -55,7 +55,8 @@ OS entropy before sequence sampling, so the trajectory diverges from that point.
 comment has been left untouched because this archive records the configuration as it
 ran; it should not be taken at face value.
 
-**No hotspot or epitope conditioning was used anywhere.** `hotspots.json` holds an empty
+**No hotspot or epitope conditioning was used anywhere.** `targets/csy4_crrna_free/hotspots.json`
+is archived in this repository and holds an empty
 array for all five stacks and is read by nothing. Published claims of hotspot residues
 for this work are incorrect.
 

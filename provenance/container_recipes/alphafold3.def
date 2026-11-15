@@ -1,0 +1,2 @@
+bootstrap: docker
+from: registry.ethz.ch/wickylab/alphafold3/ea04034

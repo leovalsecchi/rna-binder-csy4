@@ -1,0 +1,2 @@
+bootstrap: docker-daemon
+from: boltz_design1:latest

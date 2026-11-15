@@ -1,0 +1,9 @@
+[
+  {
+    "name": "csy4_crrna_free_binder",
+    "sequences": [
+      {"proteinChain": {"sequence": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "count": 1}},
+      {"rnaSequence":  {"sequence": "CACUGCCGUAUAGGCAGC",   "count": 1}}
+    ]
+  }
+]

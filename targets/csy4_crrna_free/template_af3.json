@@ -1,0 +1,32 @@
+{
+  "name": "csy4_crrna_free_binder",
+  "dialect": "alphafold3",
+  "version": 1,
+  "modelSeeds": [
+    1
+  ],
+  "sequences": [
+    {
+      "protein": {
+        "id": [
+          "A"
+        ],
+        "sequence": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "unpairedMsa": "",
+        "pairedMsa": "",
+        "templates": []
+      }
+    },
+    {
+      "rna": {
+        "id": [
+          "B"
+        ],
+        "sequence": "CACUGCCGUAUAGGCAGC",
+        "unpairedMsa": ""
+      }
+    }
+  ],
+  "bondedAtomPairs": null,
+  "userCCD": null
+}

@@ -42,6 +42,13 @@ and the masters are wide intermediate tables rather than results.
 - **Counts of designs predating the cysteine exclusion and BoltzIF Route B**, derivable
   only from run timestamps rather than recorded directly.
 
+## Archived in this repository
+
+The target inputs are small enough to ship with the code and are in `targets/` (316 KB):
+the 4AL5-derived coordinates the stacks were run against, the 16-nt MSA used for
+re-prediction, the AlphaFold3 and Protenix template JSONs, and the empty hotspot file.
+The filter that defines the gated set is `provenance/gate_v6_final.json`.
+
 ## Licence
 
 The deposited data is released under **CC-BY-4.0** (`LICENSE-DATA` in the repository

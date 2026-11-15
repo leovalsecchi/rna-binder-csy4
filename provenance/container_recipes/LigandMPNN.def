@@ -1,0 +1,2 @@
+bootstrap: docker
+from: registry.ethz.ch/wickylab/ligandmpnn/091ab1f

@@ -1,0 +1,2 @@
+bootstrap: docker-archive
+from: /work/esmc_pair_model.tar

@@ -1,0 +1,19 @@
+Bootstrap: localimage
+From: /cluster/work/wicky/containers/foundry_0.1.9.sif
+
+%files
+    /cluster/work/wicky/foundry/hbplus/hbplus /usr/local/bin/hbplus
+
+%post
+    chmod +x /usr/local/bin/hbplus
+    # Smoke test: binary should print "HBPLUS Hydrogen Bond Calculator v 3.2" and exit
+    /usr/local/bin/hbplus -h 2>&1 | head -3 || true
+
+%environment
+    export PATH=/usr/local/bin:$PATH
+
+%labels
+    HBPLUS_VERSION 3.2
+    HBPLUS_SOURCE binary from /cluster/work/wicky/foundry/hbplus/hbplus
+    BasedOn foundry_0.1.9.sif
+    BuildDate 2026-05-20

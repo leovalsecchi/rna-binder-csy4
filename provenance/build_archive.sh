@@ -66,6 +66,16 @@ copy code/pylibs   pipeline/pylibs
 
 echo "configs/, patches/, ops/, analysis/, docs/"
 copy code/configs            configs
+
+# Target inputs are DATA, so copy() would filter them out (its include list is source
+# extensions only). ~316 KB: 4AL5-derived coordinates, the 16-nt MSA as run, the AF3 and
+# Protenix templates. Small enough to archive, and the configs are meaningless without it.
+if [ -d "$SRC/targets" ]; then
+  rsync -a --exclude='.DS_Store' --exclude='._*' "$SRC/targets/" "$DEST/targets/"
+  echo "  targets -> targets  ($(find "$DEST/targets" -type f | wc -l | tr -d ' ') files)"
+else
+  echo "  skip (absent): targets"
+fi
 copy code/patches            patches/rna_binder
 copy boltzgen_patch          patches/boltzgen_routeb
 

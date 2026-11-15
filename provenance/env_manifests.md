@@ -1,0 +1,83 @@
+# Package manifests for the two environments that are NOT containerised.
+# Generated from dist-info/egg-info metadata, not from pip freeze, so each line is
+# a package as actually installed in the tree that ran.
+
+## code/envs/dockq  (host python 3.12; DockQ + RNA-aligned LRMSD)
+  biopython==1.87
+  colorama==0.4.6
+  dockq==2.1.3
+  gemmi==0.7.5
+  networkx==3.6.1
+  numpy==1.26.4
+  parallelbar==2.5
+  pip==26.1.2
+  tqdm==4.67.3
+  tqdm==4.68.3
+
+## ~/.venvs/binder_map  (laptop; Foldseek map, Leiden clustering, figures)
+  binder_map==0.1.0
+  biotite==1.2.0
+  biotraj==1.2.2
+  certifi==2026.7.22
+  charset_normalizer==3.5.1
+  contourpy==1.3.2
+  cycler==0.12.1
+  defusedxml==0.7.1
+  einops==0.8.2
+  et_xmlfile==2.0.0
+  exceptiongroup==1.3.1
+  filelock==4.1.0
+  fonttools==4.63.0
+  fsspec==2026.9.0
+  idna==3.19
+  igraph==1.0.0
+  iniconfig==2.3.0
+  jinja2==3.1.6
+  joblib==1.5.3
+  kiwisolver==1.5.0
+  leidenalg==0.12.0
+  llvmlite==0.49.0
+  lxml==6.1.2
+  markupsafe==3.0.4
+  matplotlib==3.10.9
+  mpmath==1.3.0
+  msgpack==1.2.1
+  networkx==3.4.2
+  numba==0.67.0
+  numpy==2.2.6
+  openpyxl==3.1.5
+  packaging==26.3
+  pandas==2.3.3
+  pillow==12.3.0
+  pip==26.2.1
+  pluggy==1.6.0
+  pyarrow==25.0.1
+  pydssp==0.9.1
+  pygments==2.21.0
+  pymupdf==1.28.2
+  pynndescent==0.6.0
+  pyparsing==3.3.2
+  pytest==9.1.1
+  python_dateutil==2.9.0.post0
+  python_igraph==1.0.0
+  python_pptx==1.0.2
+  pytz==2026.3.post1
+  pyyaml==6.0.3
+  requests==2.34.2
+  scikit_learn==1.7.2
+  scipy==1.15.3
+  setuptools==84.0.0
+  six==1.17.0
+  svgelements==1.9.6
+  sympy==1.14.0
+  texttable==1.7.0
+  threadpoolctl==3.6.0
+  tomli==2.4.1
+  torch==2.14.1
+  tqdm==4.70.0
+  typing_extensions==4.16.0
+  tzdata==2026.3
+  umap_learn==0.5.12
+  urllib3==2.7.0
+  vtracer==0.6.15
+  xlsxwriter==3.2.9

@@ -42,12 +42,15 @@ design matters, use the archived coordinates rather than attempting to regenerat
 pipeline/src/        rna_binder package: pipelines, io, filters, analysis, refolders
 pipeline/scripts/    collection, cleaning, metric computation, aggregation, selection
 pipeline/pylibs/     helper libraries imported by the above
+targets/             the Csy4 target itself: 4AL5-derived coordinates, the 16-nt MSA
+                     as run, AF3/Protenix templates, hotspot file (empty -- see below)
 configs/             production YAML for all five stacks and three refold backends
 ops/                 Slurm submission, refold drivers, watchers, aggregation, loops
 analysis/            plotting suite, campaign kit
 patches/             modifications applied to third-party tools (see below)
 docs/                design and findings notes cited by the Methods chapter
-provenance/          Supplementary Table S1, deviation timeline, build script
+provenance/          Supplementary Table S1, deviation timeline, the filter gate as
+                     JSON, container deffiles, environment manifests, build script
 ```
 
 Two directories deliberately absent:
@@ -74,11 +77,33 @@ Model execution was containerised (`apptainer exec --nv`). Images are 3.5–15.7
 are not in this repository; they are deposited separately and cited by sha256 digest in
 `provenance/S1.md`. All nine production images have been hashed.
 
-Two components have no recoverable version. The Protenix distribution bundled into
-`af3_protenix_esm.sif` carries no version string anywhere, and `esmc.sif` was built from
-a `docker-archive` tar that no longer exists, so its build recipe is gone — for both,
-the image digest is the only identifier. `provenance/container_recipes/` holds the build
-recipes that do survive.
+`provenance/container_recipes/` holds the Apptainer definition file for all nine, plus
+the Dockerfile recovered from inside `boltz_design1.sif`. Be aware what those deffiles
+are worth: only `foundry_0.1.9.def` has real build steps, and even that one records just
+an hbplus overlay applied to an earlier copy of the same image. The other eight are
+two-line pointers at a source. Two of those sources are citable registry references
+(LigandMPNN, AlphaFold3); four name a local Docker daemon tag (`boltzgen:latest`,
+`boltz_design1:latest`, `boltz2:latest`, `pyrosetta:latest`) which cannot be resolved
+after the fact; `esmc.sif` points at a `docker-archive` tar that was deleted; and
+`af3_protenix_esm.sif` points at a sandbox directory that no longer exists.
+
+So no image here is rebuildable from its recipe. The digest is the identifier that
+matters, and the deposited images are the artefact. Two components additionally have no
+recoverable version string at all: the Protenix distribution inside
+`af3_protenix_esm.sif`, and `esmc.sif` beyond its package list.
+
+## The filter gate
+
+`provenance/gate_v6_final.json` is the filter that defines the gated set, lifted
+verbatim from the header of the export that produced it (`n=55706`,
+`store_n=6992515`). It is recorded as data rather than described in prose because the
+selection code can express gates that were never run: evaluating the filter module's
+defaults gives roughly 66,000 designs, not 55,706. The JSON is what ran.
+
+In words, all four conditions ANDed: self-consistency RMSD ≤ 3 Å in *either* backend;
+DockQ ≥ 0.7 in *either* backend; longest single-residue run ≤ 5; hairpin-foot clearance
+`footnb_010` ≤ 5 in *both* backends; and ipTM (max across backends) ≥ 0.6. "Either
+backend" means AlphaFold3 or ESMFold2 — Boltz-2 is not in the gate.
 
 ## Data
 
