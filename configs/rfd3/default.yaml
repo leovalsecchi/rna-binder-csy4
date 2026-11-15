@@ -1,0 +1,37 @@
+# RFD3 default config for csy4_crrna_free target.
+# Reproduces /cluster/work/wicky/lvalsecchi/rfdiffusion3/sbatch/rfd3_basic.sbatch.
+# Last verified working: SIF v2 swap test (job 168335, 2026-05-20).
+
+target_id: csy4_crrna_free
+generator: rfd3
+inverse_folder: ligandmpnn        # LigandMPNN is bundled in the Foundry SIF
+config_name: default
+
+slurm:
+  partition: gpuhe.24h
+  time: "23:30:00"
+  gpus: "rtx_4090:1"
+  cpus_per_task: 4
+  mem_per_cpu: "8G"
+
+container:
+  # SIF is set by the activate script; do not override unless testing SIF swap.
+  sif: /cluster/work/wicky/containers/foundry.sif
+  activate_script: /cluster/work/wicky/lvalsecchi/rfdiffusion3/activate/foundry.activate.sh
+
+generator_params:
+  # Path to RFD3 input JSON; relative paths inside the JSON resolve from
+  # the JSON's parent dir, so the launcher must `cd` to that dir.
+  inputs: /cluster/work/wicky/lvalsecchi/rfdiffusion3/examples/rna/csy4_crrna.json
+  cwd: /cluster/work/wicky/lvalsecchi/rfdiffusion3/examples/rna   # cd to JSON dir (paths in JSON resolve relative to its own dir)
+  n_batches: 1                      # 1 batch = 8 designs (default)
+  prevalidate_inputs: true
+  skip_existing: false
+
+# Output: $OUT_DIR will get <N> .cif.gz files (N = n_batches * 8).
+# Caller is responsible for writing output under campaigns/.
+
+# Notes:
+# - Foundry-internal job IDs (e.g. 24429) are NOT Euler SLURM IDs.
+# - The bundled LigandMPNN is invoked inside RFD3's own pipeline; not a
+#   separate stage like in HalluDesign.

@@ -1,0 +1,82 @@
+#!/bin/bash
+# dockq_parallel.sh — parallel DockQ sidecar generation (chunk -> array -> merge),
+# mirroring full_metrics_parallel.sh. Runs dockq_refolds.py (af3+b2+esm DockQ-self)
+# on each chunk of a metrics CSV, then concatenates into one sidecar.
+#
+#   sbatch dockq_parallel.sh <input_csv> <out_sidecar.csv> [N_CHUNKS=64]
+#
+# e.g. full set:
+#   sbatch dockq_parallel.sh analyses/cross_campaign/combined_clean_metrics.csv \
+#          analyses/plots_tools/sidecars/dockq_full.csv 128
+#SBATCH --job-name=dqp_prep
+#SBATCH --partition=normal.4h
+#SBATCH --time=01:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --mem-per-cpu=4G
+#SBATCH --output=/cluster/work/wicky/lvalsecchi/rna_binder/analyses/_dqp_prep_%j.log
+set -euo pipefail
+RB=/cluster/work/wicky/lvalsecchi/rna_binder
+cd "$RB"; export PATH="$RB/code/bin:$PATH"
+INPUT="${1:?usage: dockq_parallel.sh <input_csv> <out_sidecar> [N]}"
+OUT="${2:?usage: dockq_parallel.sh <input_csv> <out_sidecar> [N]}"
+N="${3:-64}"
+CK="$(dirname "$OUT")/_dockq_chunks_$(basename "$OUT" .csv)"
+[ -f "$INPUT" ] || { echo "FATAL: no $INPUT"; exit 1; }
+
+echo "=== split $INPUT into $N chunks $(date) ==="
+rm -rf "$CK"; mkdir -p "$CK/logs"
+python3 - "$INPUT" "$CK" "$N" <<'PY'
+import sys, math, pandas as pd
+inp, ck, N = sys.argv[1], sys.argv[2], int(sys.argv[3])
+df = pd.read_csv(inp, low_memory=False)
+per = math.ceil(len(df) / N)
+for i in range(N):
+    df.iloc[i*per:(i+1)*per].to_csv(f"{ck}/chunk_{i:03d}.csv", index=False)
+print(f"  {len(df):,} rows -> {N} chunks (~{per} each)")
+PY
+
+# --- compute array: dockq_refolds.py (3 conditions) on each chunk ---
+cat > "$CK/_compute.sbatch" <<EOF
+#!/bin/bash
+#SBATCH --job-name=dqp_compute
+#SBATCH --partition=normal.4h
+#SBATCH --time=04:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --mem-per-cpu=3G
+#SBATCH --requeue
+#SBATCH --output=$CK/logs/%A_%a.log
+set -euo pipefail
+cd $RB; export PATH="$RB/code/bin:\$PATH"
+IDX=\$(printf "%03d" "\$SLURM_ARRAY_TASK_ID")
+IN="$CK/chunk_\${IDX}.csv"; OUT="$CK/chunk_\${IDX}_dockq.csv"
+[ -s "\$IN" ] || { echo "empty \$IN"; exit 0; }
+[ -f "\$OUT" ] && { echo "\$OUT exists, skip (resume)"; exit 0; }
+echo "chunk \$IDX: \$(( \$(wc -l < "\$IN") - 1 )) designs on \$(hostname)"
+python3 $RB/analyses/plots_tools/dockq_refolds.py --input "\$IN" --out "\$OUT" --jobs "\${SLURM_CPUS_PER_TASK:-8}"
+EOF
+
+# --- merge: concat per-chunk sidecars (disjoint design_ids) -> OUT ---
+cat > "$CK/_merge.sbatch" <<EOF
+#!/bin/bash
+#SBATCH --job-name=dqp_merge
+#SBATCH --partition=normal.4h
+#SBATCH --time=01:00:00
+#SBATCH --cpus-per-task=2
+#SBATCH --mem-per-cpu=4G
+#SBATCH --output=$(dirname "$OUT")/_dqp_merge_%j.log
+set -euo pipefail
+cd $RB
+FIRST=\$(ls $CK/chunk_*_dockq.csv 2>/dev/null | head -1)
+[ -n "\$FIRST" ] || { echo "FATAL: no chunk dockq csvs"; exit 1; }
+head -1 "\$FIRST" > "$OUT"
+n=0; for f in $CK/chunk_*_dockq.csv; do tail -n +2 "\$f" >> "$OUT"; n=\$((n+1)); done
+echo "merged \$n chunks -> \$(( \$(wc -l < "$OUT") - 1 )) designs -> $OUT"
+rm -rf "$CK"
+echo "=== dqp merge DONE \$(date) ==="
+EOF
+
+ARR=$(sbatch --parsable --array=0-$((N-1)) "$CK/_compute.sbatch")
+echo "compute array: $ARR (0-$((N-1)))"
+MRG=$(sbatch --parsable --dependency=afterok:"$ARR" "$CK/_merge.sbatch")
+echo "merge: $MRG (afterok:$ARR)"
+echo "=== dqp prep DONE $(date) ==="

@@ -1,0 +1,78 @@
+# HalluDesign cross_model config for csy4_crrna_free.
+# 1:1 reflection of code/scripts/halludesign_crossmodel_csy4_free_poc.sbatch.
+# Last verified working: job 66952183 (2026-05-18 cross_model breakthrough).
+
+target_id: csy4_crrna_free
+generator: halludesign
+inverse_folder: ligandmpnn
+config_name: default
+
+slurm:
+  job_name: csy4_free_xm_poc
+  ntasks: 4
+  nodes: 1
+  mem_per_cpu: "8G"
+  gpus: "a100_80gb:1"
+  partition: gpuhe.24h
+  time: "23:30:00"
+  # No partition specified in POC; SLURM picks default for the GPU type.
+  # No gres line (rtx_4090's 24GB sufficient for low scale).
+
+container:
+  sif: /cluster/work/wicky/lvalsecchi/rna_binder/containers/af3_protenix_esm.sif
+  apptainer_cmd: run                     # `apptainer run`, not exec (matters for entrypoint)
+  nv: true                               # --nv flag
+  home: /cluster/work/wicky/lvalsecchi/rna_binder/containers/runtime_home
+
+  binds:
+    - "/cluster/work/wicky:/cluster/work/wicky"
+    - "/cluster/software:/cluster/software:ro"
+    - "/cluster/software/manual/cuda/13.0.2/x86_64:/usr/local/cuda-real:ro"
+
+  envs:
+    PYTHONPATH: /cluster/work/wicky/lvalsecchi/rna_binder/containers/protenix_pkg
+    XDG_CACHE_HOME: /cluster/work/wicky/lvalsecchi/rna_binder/containers/runtime_cache
+    XDG_CONFIG_HOME: /cluster/work/wicky/lvalsecchi/rna_binder/containers/runtime_config
+    MPLCONFIGDIR: /cluster/work/wicky/lvalsecchi/rna_binder/containers/runtime_cache/matplotlib
+    WANDB_MODE: offline
+    CUTLASS_PATH: /cluster/work/wicky/lvalsecchi/rna_binder/containers/cutlass
+    CUDA_HOME: /usr/local/cuda-real
+    DS_SKIP_CUDA_CHECK: "1"
+    TMPDIR: /cluster/work/wicky/lvalsecchi/rna_binder/containers/runtime_home/tmp
+    LD_LIBRARY_PATH: "/usr/local/cuda-real/lib64:/.singularity.d/libs"
+    PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+
+  # Additional in-container env: PATH gets prepended at runtime:
+  #   export PATH=/usr/local/cuda-real/bin:$PATH
+
+generator_params:
+  workdir: /cluster/work/wicky/lvalsecchi/halludesign      # cd here before running
+  entrypoint: python ./HalluDesign_run.py
+
+  params:
+    HalluDesign_model: cross_model
+    input_file: /cluster/work/wicky/lvalsecchi/rna_binder/targets/csy4_crrna_free/csy4_helix.pdb
+    template_path: /cluster/work/wicky/lvalsecchi/rna_binder/targets/csy4_crrna_free/template_protenix.json
+    extra_json_path: /cluster/work/wicky/lvalsecchi/rna_binder/targets/csy4_crrna_free/template_af3.json
+    mpnn: ligand_mpnn          # underscore form, not "ligandmpnn"
+    mpnn_num_packs: 1          # KEEP 1. Packs are sidechain copies of the SAME sequence
+                               # (no extra sequence diversity, and refold-based selection
+                               # ignores input sidechains). midrun_v2 wrongly used 10 ->
+                               # 90% duplicate sequences. Diversity lever = num_seqs x num_recycles.
+    fix_chain_index: B
+    random_init: true          # flag, no value
+    rna: ACUGCCGUAUAGGCAG      # 16nt canonical
+    num_seqs: 10               # unique seqs/uuid = num_recycles x num_seqs
+    num_recycles: 15               # 15 cycles x 10 inverse-folds x 1 pack = 150 unique seqs/uuid
+    ref_time_steps: 60
+    # output_dir is filled by the launcher at runtime
+
+# Required HalluDesign source patches (see /cluster/work/wicky/lvalsecchi/halludesign/CHANGES.md):
+#   1. models_utility.py:53   regex fix to strip _recycle_.*
+#   2. evaluation.py:935       None.item() -> None
+#   3. models_utility.py:688   copied_file=source_file
+#   4. models_utility.py:893   CIF path construction
+# Diagnostic block in the proven sbatch (deepspeed/nvcc verification) is
+# considered debugging-only, not part of the canonical invocation.
+
+# Output: HalluDesign writes processing_results.csv + recycle_N/ subdirs.

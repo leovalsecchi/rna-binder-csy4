@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""run_all.py — single entry point: run all 10 plots into output/{png,html}/.
+
+    python3 run_all.py [--stacks s1 s2 ...] [--outdir DIR] [--master CSV]
+
+Imports and calls each plot's generate(df, cfg) in order, saving one PNG + one
+HTML per plot, and writes an index.html linking them all.
+"""
+from __future__ import annotations
+import argparse
+import importlib
+from pathlib import Path
+
+import config as cfg
+import data_loader as D
+import plot_helpers as H
+
+PLOTS = [
+    "plot_01_overview", "plot_01_1_top_designs", "plot_01_2_best_per_stack",
+    "plot_02_violin_iptm", "plot_03_violin_dockq",
+    "plot_04_scatter_iptm_dockq", "plot_05_nt_interface_freq", "plot_06_nt_hbond_freq",
+    "plot_07_refolder_compare", "plot_08_secondary_structure", "plot_09_funnel_avg",
+    "plot_10_funnel_strict",
+    "plot_11_hbond_heatmap", "plot_12_interface_heatmap",
+    "plot_13_venn_refolder_pass",
+    "plot_14_tip_vs_quality", "plot_15_quality_cube",
+    "plot_16_iptm_refolder_cube", "plot_17_dockq_refolder_cube",
+    "plot_18_scaffold_fit",
+    "plot_19_refolder_iptm_pairs", "plot_20_refolder_dockq_pairs",
+    "plot_21_funnel_topx",
+]
+
+
+def _write_index(html_dir: Path, names, meta):
+    items = "\n".join(
+        f'<li><a href="{n}.html">{n}</a></li>' for n in names
+    )
+    html = f"""<!doctype html><meta charset="utf-8"><title>Csy4 binder — plots</title>
+<style>body{{font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;color:#0b0b0b;
+max-width:760px;margin:40px auto;padding:0 16px}}h1{{font-size:22px}}
+li{{margin:.3em 0}}a{{color:#0072B2}}.meta{{color:#52514e;font-size:13px;margin:1em 0}}</style>
+<h1>Csy4 RNA-binder — plotting suite</h1>
+<div class="meta">{meta}</div><ol>{items}</ol>"""
+    (html_dir / "index.html").write_text(html)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--stacks", nargs="*", default=None, help="filter to a subset of stacks")
+    ap.add_argument("--outdir", default=None, help="override output dir (gets png/ and html/)")
+    ap.add_argument("--master", default=None, help="override master metrics CSV")
+    a = ap.parse_args()
+
+    png_dir = Path(a.outdir) / "png" if a.outdir else cfg.PNG_DIR
+    html_dir = Path(a.outdir) / "html" if a.outdir else cfg.HTML_DIR
+    png_dir.mkdir(parents=True, exist_ok=True)
+    html_dir.mkdir(parents=True, exist_ok=True)
+
+    df = D.load(master_csv=a.master, stacks=a.stacks)
+    st = D.status(df)
+    live = ", ".join(k for k, v in st.items() if v)
+    pend = ", ".join(k for k, v in st.items() if not v)
+    print(f"loaded {len(df)} rows / {df['design_id'].nunique()} designs / {df['stack'].nunique()} stacks")
+    print(f"  metrics live: {live}")
+    print(f"  pending:      {pend or '(none)'}")
+
+    ok = 0
+    for name in PLOTS:
+        mod = importlib.import_module(name)
+        try:
+            res = mod.generate(df, cfg)
+            fig_mpl, fig_ply = res[0], res[1]
+            html_override = res[2] if len(res) > 2 else None
+            H.save_pair(fig_mpl, fig_ply, name, png_dir, html_dir,
+                        click_js=getattr(mod, "CLICK_JS", None),
+                        html_override=html_override)
+            print(f"  [ok]  {name}")
+            ok += 1
+        except Exception as e:  # noqa: BLE001 — one bad plot must not sink the run
+            print(f"  [ERR] {name}: {type(e).__name__}: {e}")
+
+    # extract the best designs (uncompressed, rank-named) into analyses/best_binders/
+    try:
+        import export_best_binders
+        export_best_binders.export(master_csv=a.master, stacks=a.stacks)
+    except Exception as e:  # noqa: BLE001 — export must not sink the plot run
+        print(f"  [ERR] best_binders export: {type(e).__name__}: {e}")
+
+    meta = (f"{df['design_id'].nunique():,} designs · {df['stack'].nunique()} stacks · "
+            f"MSA-off refolds · pending metrics: {pend or 'none'}")
+    _write_index(html_dir, PLOTS, meta)
+    print(f"{ok}/{len(PLOTS)} plots written → {html_dir}")
+
+
+if __name__ == "__main__":
+    main()

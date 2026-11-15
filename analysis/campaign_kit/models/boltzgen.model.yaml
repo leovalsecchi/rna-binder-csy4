@@ -1,0 +1,23 @@
+# EXAMPLE gen model — BoltzGen (paired with an inverse folder: boltzif or ligandmpnn).
+name: boltzgen
+kind: gen
+container:
+  sif: ${rb_root}/containers/boltzgen.sif
+  apptainer_cmd: run
+  nv: true
+  binds: ["${shared}:${shared}"]
+  envs: {}
+entrypoint: "python -m boltzgen.generate"
+params: {}
+flag_style: {boolean_flags: [], render: "--{key} {value}"}
+per_unit_seed: true
+io:
+  needs: [target_pdb]
+  emits: designs/
+  units_per_job: 608
+compat_hints:
+  min_arch: sm_75              # arch-agnostic (~2h)
+  vram_g: null
+  sec_per_unit: null
+probe:
+  jobname_match: "(boltzgen|_bg)"

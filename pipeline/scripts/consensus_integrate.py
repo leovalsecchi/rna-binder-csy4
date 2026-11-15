@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""consensus_integrate.py — generalized per-family worst-case consensus across the
+af3/b2/esm PER-BACKEND chunk sets produced by fullmetrics_chunk.sbatch.
+
+The full-metrics flow writes BARE metric columns into per-backend chunk CSVs
+(chunk_<be>_<NN>.csv) — no backend is privileged. Per family this tool:
+  * concatenates each backend's chunks, suffixes its columns _af3/_b2/_esm,
+    merges them onto the master by design_id (all three preserved),
+  * writes the WORST-CASE consensus into the bare column: min for higher-is-better
+    metrics, max for lower-is-better,
+  * GATE: the consensus is a true 3-backend worst-case ONLY where all three backends
+    actually scored the design. Where fewer scored, the bare consensus is set to NaN
+    (never a falsely-lenient partial), and <family>_consensus_n records how many did.
+
+Idempotent (drops prior _af3/_b2/_esm + _consensus_n for the family). Backs up the master.
+
+  python3 consensus_integrate.py --master M.csv --chunkdir D \
+      [--families interface,hbonds,red,dockq,pistack] [--out O] [--dry-run]
+"""
+import argparse
+import glob
+import os
+import shutil
+import sys
+
+import pandas as pd
+
+BE = ("af3", "b2", "esm")
+
+# Per family: min = higher-is-better (worst-case = min across backends),
+#             max = lower-is-better  (worst-case = max), sentinel = "did this backend score it?"
+FAMILIES = {
+    "interface": dict(
+        min=["dsasa_total", "dsasa_polar", "dsasa_hphobic", "sc_value", "packstat",
+             "n_heavy_contacts_4A", "n_heavy_contacts_4p5A", "n_contact_res_prot",
+             "n_contact_res_rna", "n_contacts_base", "n_contacts_backbone",
+             "n_contacts_phosphate", "n_contacts_sugar", "frac_base_contacts"],
+        max=["delta_unsat_hbonds", "n_interface_clashes", "clash_overlap_sum", "worst_clash"],
+        sentinel="sc_value"),
+    "hbonds": dict(min=["n_h_bonds_interface"], max=[], sentinel="n_h_bonds_interface"),
+    "red": dict(min=[], max=["red_clashes_per_ifaceres", "red_acid_phos_per_ifaceres",
+                             "red_hphob_polar_per_ifaceres", "red_total_per_ifaceres"],
+                sentinel="red_total_per_ifaceres"),
+    "dockq": dict(min=["dockq_self", "dockq_fnat"], max=["dockq_LRMSD", "dockq_iRMSD"],
+                  sentinel="dockq_self"),
+    "pistack": dict(min=["pi_stack_score"], max=[], sentinel="pi_stack_score"),
+    "structural": dict(min=["radius_of_gyration_ca"], max=[],
+                        sentinel="radius_of_gyration_ca"),
+}
+
+
+def load_be(chunkdir, be, cols):
+    files = sorted(glob.glob(os.path.join(chunkdir, f"chunk_{be}_*.csv")))
+    if not files:
+        return None, 0
+    d = pd.concat([pd.read_csv(f, low_memory=False) for f in files],
+                  ignore_index=True).drop_duplicates("design_id")
+    have = [c for c in cols if c in d.columns]
+    d = d[["design_id"] + have].rename(columns={c: f"{c}_{be}" for c in have})
+    return d, len(files)
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--master", required=True, help="master CSV to annotate (by design_id)")
+    ap.add_argument("--chunkdir", required=True, help="dir of chunk_<be>_<NN>.csv")
+    ap.add_argument("--families", default=",".join(FAMILIES),
+                    help="comma list (default: all): " + ",".join(FAMILIES))
+    ap.add_argument("--out", default=None, help="write here (default: overwrite master, with .bak)")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+
+    fams = [f.strip() for f in args.families.split(",") if f.strip()]
+    bad = [f for f in fams if f not in FAMILIES]
+    if bad:
+        sys.exit(f"unknown families: {bad}. known: {list(FAMILIES)}")
+
+    m = pd.read_csv(args.master, low_memory=False)
+    print(f"master {args.master}: {len(m)} rows, {len(m.columns)} cols")
+
+    # union of all requested families' managed cols (dedup, keep order)
+    allcols = []
+    for fam in fams:
+        for c in FAMILIES[fam]["min"] + FAMILIES[fam]["max"]:
+            if c not in allcols:
+                allcols.append(c)
+
+    # idempotent: drop any prior per-backend + consensus_n columns
+    drop = [f"{c}_{be}" for c in allcols for be in BE if f"{c}_{be}" in m.columns]
+    drop += [f"{fam}_consensus_n" for fam in fams if f"{fam}_consensus_n" in m.columns]
+    if drop:
+        m = m.drop(columns=drop)
+
+    # read each backend's chunks ONCE (all families' cols) and merge onto master
+    merged_bes = []
+    for be in BE:
+        d, nf = load_be(args.chunkdir, be, allcols)
+        if d is None:
+            print(f"  {be}: no chunks — skipped")
+            continue
+        m = m.merge(d, on="design_id", how="left")
+        merged_bes.append(be)
+        print(f"  {be}: {nf} chunks merged ({len(d.columns)-1} cols, all families)")
+
+    # per-family worst-case consensus + ==3 gate, all in-memory (no re-reads)
+    for fam in fams:
+        spec = FAMILIES[fam]
+        cols = spec["min"] + spec["max"]
+        sent = [f"{spec['sentinel']}_{be}" for be in BE
+                if f"{spec['sentinel']}_{be}" in m.columns]
+        n_scored = (m[sent].apply(pd.to_numeric, errors="coerce").notna().sum(axis=1)
+                    if sent else pd.Series(0, index=m.index))
+        m[f"{fam}_consensus_n"] = n_scored
+        full = n_scored.eq(len(BE))
+        for c in cols:
+            trio = [f"{c}_{be}" for be in BE if f"{c}_{be}" in m.columns]
+            if not trio:
+                continue
+            vals = m[trio].apply(pd.to_numeric, errors="coerce")
+            cons = vals.min(axis=1) if c in spec["min"] else vals.max(axis=1)
+            m[c] = cons.where(full)     # GATE: NaN unless all 3 backends scored
+        print(f"  [{fam}] full-consensus(n==3): {int(full.sum())}/{len(m)}")
+
+    if args.dry_run:
+        print("\n[dry-run] no file written. sample consensus_n distributions:")
+        for fam in fams:
+            col = f"{fam}_consensus_n"
+            if col in m.columns:
+                print(f"  {col}:\n{m[col].value_counts().sort_index().to_string()}")
+        return
+
+    out = args.out or args.master
+    if out == args.master:
+        shutil.copy(args.master, args.master + ".bak_pre_consensus")
+    m.to_csv(out, index=False)
+    print(f"\nwrote {out}: {len(m)} rows x {len(m.columns)} cols")
+
+
+if __name__ == "__main__":
+    main()

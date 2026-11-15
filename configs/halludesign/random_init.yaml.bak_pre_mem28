@@ -1,0 +1,87 @@
+# HalluDesign cross_model DE-NOVO (no fake helix) config for csy4_crrna_free.
+# Variant of default.yaml: replaces --input_file csy4_helix.pdb with the
+# predict-first --random_init_chain_spec "A:80" mode (upstream 1b08312, commit a32c8e7).
+# default.yaml (the proven poly-ALA-helix path) is the FALLBACK and is left untouched.
+#
+# Runs the UPGRADED checkout (worktree halludesign_upgrade @ branch upgrade-1b08312 =
+# 1b08312 + reapplied local patches, commit 42ccb00). Live ~/halludesign is NOT used by
+# this config. On promotion (after validation + sign-off), either merge upgrade-1b08312
+# into the live install and flip workdir back, or keep pointing here.
+#
+# DIVERSITY/SEED WARNING: in de-novo mode the initial random protein sequence is sampled
+# from --seed (design i uses seed+i) and the Protenix init prediction is otherwise
+# deterministic -> the SAME seed yields the SAME trajectory. Per-uuid num_designs MUST
+# stay 1 (else trajectories share random_init_NNN tags in one designs/ dir), so to get
+# diversity ACROSS uuids the campaign launcher MUST override the seed per submission, e.g.
+#   --override generator_params.params.seed=<unique-per-uuid>
+# The seed below is only a default for single test runs.
+
+target_id: csy4_crrna_free
+generator: halludesign
+inverse_folder: ligandmpnn
+config_name: random_init
+
+slurm:
+  job_name: csy4_free_xm_denovo
+  ntasks: 4
+  nodes: 1
+  mem_per_cpu: "8G"
+  gpus: "a100_80gb:1"
+  partition: gpuhe.24h
+  time: "23:30:00"
+
+container:
+  sif: /cluster/work/wicky/lvalsecchi/rna_binder/containers/af3_protenix_esm.sif
+  apptainer_cmd: run
+  nv: true
+  home: /cluster/work/wicky/lvalsecchi/rna_binder/containers/runtime_home
+
+  binds:
+    - "/cluster/work/wicky:/cluster/work/wicky"
+    - "/cluster/software:/cluster/software:ro"
+    - "/cluster/software/manual/cuda/13.0.2/x86_64:/usr/local/cuda-real:ro"
+
+  envs:
+    PYTHONPATH: /cluster/work/wicky/lvalsecchi/rna_binder/containers/protenix_pkg
+    XDG_CACHE_HOME: /cluster/work/wicky/lvalsecchi/rna_binder/containers/runtime_cache
+    XDG_CONFIG_HOME: /cluster/work/wicky/lvalsecchi/rna_binder/containers/runtime_config
+    MPLCONFIGDIR: /cluster/work/wicky/lvalsecchi/rna_binder/containers/runtime_cache/matplotlib
+    WANDB_MODE: offline
+    CUTLASS_PATH: /cluster/work/wicky/lvalsecchi/rna_binder/containers/cutlass
+    CUDA_HOME: /usr/local/cuda-real
+    DS_SKIP_CUDA_CHECK: "1"
+    TMPDIR: /cluster/work/wicky/lvalsecchi/rna_binder/containers/runtime_home/tmp
+    LD_LIBRARY_PATH: "/usr/local/cuda-real/lib64:/.singularity.d/libs"
+    PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+
+generator_params:
+  workdir: /cluster/work/wicky/lvalsecchi/halludesign_upgrade   # UPGRADED worktree (not live ~/halludesign)
+  entrypoint: python ./HalluDesign_run.py
+
+  params:
+    HalluDesign_model: cross_model
+    # NO input_file: de-novo predict-first start (mutually exclusive with random_init_chain_spec)
+    random_init_chain_spec: "A:80"   # protein chain A, length 80 (mirrors the helix length); "A:60-100" to scan
+    num_designs: 1                   # KEEP 1 per uuid (multi-design shares random_init_NNN tags in one dir)
+    seed: 1                          # OVERRIDE per-uuid in the campaign (see header) — default for single tests
+    template_path: /cluster/work/wicky/lvalsecchi/rna_binder/targets/csy4_crrna_free/template_protenix.json
+    extra_json_path: /cluster/work/wicky/lvalsecchi/rna_binder/targets/csy4_crrna_free/template_af3.json
+    mpnn: ligand_mpnn
+    mpnn_num_packs: 1
+    fix_chain_index: B               # RNA = chain B, held fixed
+    random_init: true                # redundant with random_init_chain_spec (which sets it) but explicit
+    rna: CACUGCCGUAUAGGCAGC          # 18nt FULL canonical csy4 crRNA (PDB 4AL5) — matches templates +
+                                     # helix-HD output + the rest of the campaign. (The old 16nt value
+                                     # ACUGCCGUAUAGGCAG was a terminal-C-trimmed truncation; harmless in
+                                     # helix mode where the input PDB's 18nt RNA overrides --rna, but in
+                                     # de-novo mode --rna IS the RNA, so it MUST be the full 18nt.)
+    num_seqs: 10                     # unique seqs/uuid = num_recycles x num_seqs = 150
+    num_recycles: 15
+    ref_time_steps: 60
+    # output_dir is filled by the launcher at runtime
+
+# HalluDesign source patches live in the UPGRADED checkout
+# (/cluster/work/wicky/lvalsecchi/halludesign_upgrade, branch upgrade-1b08312, commit 42ccb00):
+#   transplant of the 25f1045 production patch set onto 1b08312 (debug probes dropped).
+# Output: HalluDesign writes processing_results.csv + recycle_N/ subdirs; for de-novo runs
+# recycle_1/ also holds random_init_001_recycle_1_init.{json,pdb} (ignored by postprocess).

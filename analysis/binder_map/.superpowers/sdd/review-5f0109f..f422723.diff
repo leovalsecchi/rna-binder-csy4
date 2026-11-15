@@ -1,0 +1,321 @@
+# Review package: 5f0109f..HEAD
+
+## Commits
+f422723 Sync plan with kNN mutual-pick dedup fix
+51182f5 Add axis-agnostic kNN with separate cluster and layout graphs
+
+## Files changed
+ .../plans/2026-08-21-foldseek-binder-map.md        |  15 ++
+ src/binder_map/knn.py                              | 165 +++++++++++++++++++++
+ tests/test_knn.py                                  |  91 ++++++++++++
+ 3 files changed, 271 insertions(+)
+
+## Diff
+diff --git a/docs/superpowers/plans/2026-08-21-foldseek-binder-map.md b/docs/superpowers/plans/2026-08-21-foldseek-binder-map.md
+index 0800203..09ae587 100644
+--- a/docs/superpowers/plans/2026-08-21-foldseek-binder-map.md
++++ b/docs/superpowers/plans/2026-08-21-foldseek-binder-map.md
+@@ -1764,20 +1764,35 @@ def symmetrise_min(qi, qj, qtm, ttm):
+             best.astype(np.float32))
+ 
+ 
+ def _topk_per_node(n, i, j, sim, k):
+     """Keep the k strongest incident edges per node, as an undirected set."""
+     if len(i) == 0:
+         return np.empty((0, 2), np.int32), np.empty(0, np.float32)
+     src = np.concatenate([i, j])
+     dst = np.concatenate([j, i])
+     val = np.concatenate([sim, sim])
++
++    # Dedup identical directed (src, dst) pairs before ranking. Without this,
++    # a *mutual* top-k pick (A has B in A's own top-k, and B independently
++    # has A in B's own top-k) produces two rows for the same neighbour in
++    # A's incident run: A's own forward entry, plus B's mirrored entry. That
++    # duplicate silently eats a second rank slot, evicting a genuinely
++    # distinct, lower-similarity neighbour from the top-k window entirely
++    # (fewer than k neighbours survive for A, and a real edge can be dropped
++    # from the cluster graph even though it is above the floor).
++    order = np.lexsort((-val, dst, src))
++    src, dst, val = src[order], dst[order], val[order]
++    first = np.ones(len(src), dtype=bool)
++    first[1:] = (src[1:] != src[:-1]) | (dst[1:] != dst[:-1])
++    src, dst, val = src[first], dst[first], val[first]
++
+     order = np.lexsort((-val, src))
+     src, dst, val = src[order], dst[order], val[order]
+ 
+     # Rank each edge within its source node's run: the arrays are already
+     # sorted by (src, -val), so position-within-run IS the similarity rank.
+     starts = np.flatnonzero(np.r_[True, src[1:] != src[:-1]])
+     run_lengths = np.diff(np.r_[starts, len(src)])
+     rank = np.arange(len(src)) - np.repeat(starts, run_lengths)
+     keep = rank < k
+ 
+diff --git a/src/binder_map/knn.py b/src/binder_map/knn.py
+new file mode 100644
+index 0000000..02ef720
+--- /dev/null
++++ b/src/binder_map/knn.py
+@@ -0,0 +1,165 @@
++"""kNN graphs for both axes.
++
++Two graphs come out of every call, and they are deliberately different:
++
++  cluster graph  thresholded at `floor`, then top-k. A node with no neighbour
++                 above the floor is a genuine isolate and becomes its own
++                 singleton cluster. Absence of evidence stays absence of
++                 evidence.
++  layout graph   raw top-k with no floor, so every node has k neighbours.
++                 UMAP's precomputed_knn needs a full k per node, and padding
++                 the thresholded graph would fabricate exactly the edges the
++                 floor exists to reject.
++
++A point can therefore sit inside a visual cluster while being a singleton by
++cluster id. That is informative, not a bug.
++"""
++from __future__ import annotations
++
++from dataclasses import dataclass
++
++import numpy as np
++
++
++@dataclass(frozen=True)
++class KNNResult:
++    cluster_edges: np.ndarray    # (m, 2) int32, i < j
++    cluster_weights: np.ndarray  # (m,) float32
++    layout_edges: np.ndarray     # (p, 2) int32
++    layout_weights: np.ndarray   # (p,) float32
++    degree: np.ndarray           # (n,) int32, in the cluster graph
++    is_isolate: np.ndarray       # (n,) bool
++
++
++def symmetrise_min(qi, qj, qtm, ttm):
++    """Collapse directed Foldseek hits into undirected min(qTM, tTM) pairs.
++
++    Conservative: a pair only scores high if it is high in both
++    normalisations. Where both directions were observed, the pair keeps the
++    max of the two observed minima.
++    """
++    qi = np.asarray(qi)
++    qj = np.asarray(qj)
++    sim = np.minimum(np.asarray(qtm, dtype=np.float64),
++                     np.asarray(ttm, dtype=np.float64))
++
++    keep = qi != qj
++    a = np.minimum(qi[keep], qj[keep])
++    b = np.maximum(qi[keep], qj[keep])
++    sim = sim[keep]
++
++    if len(a) == 0:
++        return (np.empty(0, np.int32), np.empty(0, np.int32),
++                np.empty(0, np.float32))
++
++    order = np.lexsort((b, a))
++    a, b, sim = a[order], b[order], sim[order]
++    new = np.ones(len(a), dtype=bool)
++    new[1:] = (a[1:] != a[:-1]) | (b[1:] != b[:-1])
++    group = np.cumsum(new) - 1
++    best = np.zeros(group[-1] + 1, dtype=np.float64)
++    np.maximum.at(best, group, sim)
++    return (a[new].astype(np.int32), b[new].astype(np.int32),
++            best.astype(np.float32))
++
++
++def _topk_per_node(n, i, j, sim, k):
++    """Keep the k strongest incident edges per node, as an undirected set."""
++    if len(i) == 0:
++        return np.empty((0, 2), np.int32), np.empty(0, np.float32)
++    src = np.concatenate([i, j])
++    dst = np.concatenate([j, i])
++    val = np.concatenate([sim, sim])
++
++    # Dedup identical directed (src, dst) pairs before ranking. Without this,
++    # a *mutual* top-k pick (A has B in A's own top-k, and B independently
++    # has A in B's own top-k) produces two rows for the same neighbour in
++    # A's incident run: A's own forward entry, plus B's mirrored entry. That
++    # duplicate silently eats a second rank slot, evicting a genuinely
++    # distinct, lower-similarity neighbour from the top-k window entirely
++    # (fewer than k neighbours survive for A, and a real edge can be dropped
++    # from the cluster graph even though it is above the floor).
++    order = np.lexsort((-val, dst, src))
++    src, dst, val = src[order], dst[order], val[order]
++    first = np.ones(len(src), dtype=bool)
++    first[1:] = (src[1:] != src[:-1]) | (dst[1:] != dst[:-1])
++    src, dst, val = src[first], dst[first], val[first]
++
++    order = np.lexsort((-val, src))
++    src, dst, val = src[order], dst[order], val[order]
++
++    # Rank each edge within its source node's run: the arrays are already
++    # sorted by (src, -val), so position-within-run IS the similarity rank.
++    starts = np.flatnonzero(np.r_[True, src[1:] != src[:-1]])
++    run_lengths = np.diff(np.r_[starts, len(src)])
++    rank = np.arange(len(src)) - np.repeat(starts, run_lengths)
++    keep = rank < k
++
++    a = np.minimum(src[keep], dst[keep])
++    b = np.maximum(src[keep], dst[keep])
++    v = val[keep]
++    order = np.lexsort((b, a))
++    a, b, v = a[order], b[order], v[order]
++    new = np.ones(len(a), dtype=bool)
++    new[1:] = (a[1:] != a[:-1]) | (b[1:] != b[:-1])
++    return (np.stack([a[new], b[new]], axis=1).astype(np.int32),
++            v[new].astype(np.float32))
++
++
++def _assemble(n, i, j, sim, k, floor) -> KNNResult:
++    layout_edges, layout_weights = _topk_per_node(n, i, j, sim, k)
++
++    above = sim >= floor
++    cluster_edges, cluster_weights = _topk_per_node(
++        n, i[above], j[above], sim[above], k
++    )
++
++    degree = np.zeros(n, dtype=np.int32)
++    if len(cluster_edges):
++        np.add.at(degree, cluster_edges.ravel(), 1)
++    return KNNResult(cluster_edges, cluster_weights,
++                     layout_edges, layout_weights,
++                     degree, degree == 0)
++
++
++def knn_from_pairs(n, i, j, sim, k, floor) -> KNNResult:
++    """Build both graphs from an existing sparse similarity list."""
++    return _assemble(n, np.asarray(i), np.asarray(j),
++                     np.asarray(sim, dtype=np.float32), k, floor)
++
++
++def knn_from_vectors(vectors, k, floor, block: int = 4096) -> KNNResult:
++    """Exact cosine kNN over L1-normalised rows, by blocked matrix product.
++
++    72k x 48 float32 is ~14 MB, so the full product is computed in blocks on
++    one node in a couple of minutes. No approximate index, no extra
++    dependency.
++    """
++    v = np.asarray(vectors, dtype=np.float64)
++    n = len(v)
++
++    l1 = np.abs(v).sum(axis=1, keepdims=True)
++    l1[l1 == 0] = 1.0
++    v = v / l1
++    norm = np.linalg.norm(v, axis=1, keepdims=True)
++    norm[norm == 0] = 1.0
++    unit = (v / norm).astype(np.float32)
++
++    kk = min(k, max(n - 1, 1))
++    all_i, all_j, all_s = [], [], []
++    for start in range(0, n, block):
++        stop = min(start + block, n)
++        sims = unit[start:stop] @ unit.T
++        rows = np.arange(start, stop)
++        sims[np.arange(stop - start), rows] = -np.inf   # drop self
++        idx = np.argpartition(-sims, kth=kk - 1, axis=1)[:, :kk]
++        take = np.take_along_axis(sims, idx, axis=1)
++        all_i.append(np.repeat(rows, kk))
++        all_j.append(idx.ravel())
++        all_s.append(take.ravel())
++
++    i = np.concatenate(all_i)
++    j = np.concatenate(all_j)
++    s = np.concatenate(all_s).astype(np.float32)
++    good = np.isfinite(s)
++    return _assemble(n, i[good], j[good], s[good], k, floor)
+diff --git a/tests/test_knn.py b/tests/test_knn.py
+new file mode 100644
+index 0000000..f3b8b6f
+--- /dev/null
++++ b/tests/test_knn.py
+@@ -0,0 +1,91 @@
++import numpy as np
++import pytest
++
++from binder_map.knn import knn_from_pairs, knn_from_vectors, symmetrise_min
++
++
++def test_symmetrise_takes_min_of_the_two_normalisations():
++    qi = np.array([0, 1])
++    qj = np.array([1, 0])
++    qtm = np.array([0.9, 0.4])
++    ttm = np.array([0.5, 0.8])
++    i, j, sim = symmetrise_min(qi, qj, qtm, ttm)
++    assert len(i) == 1
++    # direction 0->1 gives min(0.9,0.5)=0.5; 1->0 gives min(0.4,0.8)=0.4
++    # the pair keeps the max of the observed mins
++    assert sim[0] == pytest.approx(0.5)
++
++
++def test_symmetrise_drops_self_hits():
++    i, j, sim = symmetrise_min(
++        np.array([0, 0]), np.array([0, 1]),
++        np.array([1.0, 0.6]), np.array([1.0, 0.6]),
++    )
++    assert len(i) == 1
++    assert (i[0], j[0]) == (0, 1)
++
++
++def test_floor_excludes_weak_edges_from_clustering_but_not_layout():
++    # 3 nodes: 0-1 strong, 0-2 weak
++    i = np.array([0, 0])
++    j = np.array([1, 2])
++    sim = np.array([0.9, 0.1])
++    res = knn_from_pairs(3, i, j, sim, k=2, floor=0.5)
++    cluster_pairs = {tuple(sorted(e)) for e in res.cluster_edges}
++    layout_pairs = {tuple(sorted(e)) for e in res.layout_edges}
++    assert (0, 1) in cluster_pairs
++    assert (0, 2) not in cluster_pairs   # below floor
++    assert (0, 2) in layout_pairs        # layout keeps unthresholded top-k
++
++
++def test_node_with_no_edge_above_floor_is_an_isolate():
++    i = np.array([0])
++    j = np.array([1])
++    sim = np.array([0.2])
++    res = knn_from_pairs(3, i, j, sim, k=2, floor=0.5)
++    assert res.is_isolate[0]
++    assert res.is_isolate[1]
++    assert res.is_isolate[2]   # node 2 has no hits at all
++    assert len(res.cluster_edges) == 0
++
++
++def test_knn_from_vectors_finds_identical_vectors():
++    v = np.array([
++        [1.0, 0.0, 0.0],
++        [1.0, 0.0, 0.0],   # identical to 0
++        [0.0, 1.0, 0.0],   # orthogonal
++    ])
++    res = knn_from_vectors(v, k=1, floor=0.5)
++    pairs = {tuple(sorted(e)) for e in res.cluster_edges}
++    assert (0, 1) in pairs
++    assert (0, 2) not in pairs
++
++
++def test_knn_from_vectors_is_scale_invariant():
++    """L1 normalisation: a promiscuous binder and a sparse one that touch the
++    same place must be neighbours."""
++    v = np.array([
++        [2.0, 1.0, 0.0],
++        [20.0, 10.0, 0.0],   # same profile, 10x the contacts
++        [0.0, 0.0, 5.0],
++    ])
++    res = knn_from_vectors(v, k=1, floor=0.9)
++    pairs = {tuple(sorted(e)) for e in res.cluster_edges}
++    assert (0, 1) in pairs
++
++
++def test_knn_from_vectors_blocking_matches_unblocked():
++    rng = np.random.default_rng(0)
++    v = rng.random((200, 12))
++    a = knn_from_vectors(v, k=5, floor=0.0, block=1000)
++    b = knn_from_vectors(v, k=5, floor=0.0, block=32)
++    assert {tuple(sorted(e)) for e in a.cluster_edges} == \
++           {tuple(sorted(e)) for e in b.cluster_edges}
++
++
++def test_layout_graph_gives_every_node_k_neighbours():
++    rng = np.random.default_rng(1)
++    v = rng.random((50, 8))
++    res = knn_from_vectors(v, k=5, floor=0.99)
++    counts = np.bincount(res.layout_edges.ravel(), minlength=50)
++    assert (counts >= 5).all()

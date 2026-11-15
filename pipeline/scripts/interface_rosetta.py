@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""interface_rosetta.py — field-standard protein<->RNA interface dSASA + packing
+metrics via Rosetta InterfaceAnalyzer. Runs INSIDE pyrosetta.sif.
+
+AF3/Boltz CIFs are heavy-atom only; Rosetta builds full-atom hydrogens and uses
+its standard atom typing, so its dSASA / hydrophobic-dSASA are the canonical
+numbers (not the heavy-atom Biotite estimate). One InterfaceAnalyzerMover pass
+per structure fills, in place, for every row (matched by --path-col, default
+af3_msaoff_cif_path):
+
+    dsasa_total          total buried SASA on binding (A^2)          [InterfaceData.dSASA[0]]
+    dsasa_hphobic        buried hydrophobic (nonpolar / NPSA) SASA   [InterfaceData.dhSASA[0]]
+    dsasa_polar          dsasa_total - dsasa_hphobic
+    dsasa_hphobic_frac   dsasa_hphobic / dsasa_total
+    sc_value             interface shape complementarity (0..1)      [--no-sc to skip]
+    packstat             interface packing statistic (0..1)          [--no-packstat to skip]
+    delta_unsat_hbonds   buried unsatisfied polar atoms
+
+dG is deliberately NOT reported: a meaningful protein-RNA dG_bind needs an
+RNA-aware score function and a repacked separated state (a separate protocol);
+the rigid default value is not trustworthy, so we omit it rather than mislead.
+
+The interface is auto-detected per structure: all protein chains vs all RNA/DNA
+chains (chain labels need not be A/B). Stdlib-only IO (csv, multiprocessing) so it
+does not need pandas in the container. PyRosetta is initialised once per worker.
+
+Usage (inside pyrosetta.sif):
+    apptainer exec --bind /cluster/work/wicky --bind /tmp --env MPLCONFIGDIR=/tmp \\
+        /cluster/work/wicky/containers/pyrosetta.sif \\
+        python3 code/scripts/interface_rosetta.py \\
+        --csv analyses/<name>/sample10k_metrics.csv --progress
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import os
+import sys
+from multiprocessing import Pool
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from archive_read import resolve   # archive-aware path resolution (.tar.zst!member)
+
+csv.field_size_limit(10 ** 7)
+
+PATH_COL_DEFAULT = "af3_msaoff_cif_path"
+COLS = ["dsasa_total", "dsasa_polar", "dsasa_hphobic", "dsasa_hphobic_frac",
+        "sc_value", "packstat", "delta_unsat_hbonds"]
+COLS_FAREP = ["interface_fa_rep"]      # --farep-only steric-clash energy
+HBOND_COL = "n_h_bonds_interface"      # --with-hbonds fuses hbonds_pyrosetta in
+
+# per-worker PyRosetta scorefunction + run config (set in the pool initializer /
+# inherited across fork from module globals)
+_SF = None
+_CFG = {"packstat": True, "sc": True, "hbonds": False}
+
+
+def _worker_init():
+    global _SF
+    import pyrosetta
+    pyrosetta.init("-mute all -ignore_unrecognized_res true -ignore_zero_occupancy false")
+    _SF = pyrosetta.get_fa_scorefxn()
+
+
+def _analyze_one(path):
+    """Return (path, metrics dict) or (path, None) on any failure."""
+    import pyrosetta
+    from pyrosetta.rosetta.protocols.analysis import InterfaceAnalyzerMover
+    try:
+        pose = pyrosetta.pose_from_file(resolve(path))
+        info = pose.pdb_info()
+        cp, cr = set(), set()
+        for i in range(1, pose.total_residue() + 1):
+            r = pose.residue(i)
+            ch = info.chain(i)
+            if r.is_protein():
+                cp.add(ch)
+            elif r.is_RNA() or r.is_DNA():
+                cr.add(ch)
+        if not cp or not cr:
+            return path, None
+        iface = "".join(sorted(cp)) + "_" + "".join(sorted(cr))
+        iam = InterfaceAnalyzerMover(iface)
+        iam.set_compute_packstat(_CFG["packstat"])
+        iam.set_compute_interface_sc(_CFG["sc"])
+        iam.set_pack_separated(False)          # rigid: dSASA/sc/packstat need no repack
+        iam.set_scorefunction(_SF)
+        iam.apply(pose)
+        d = iam.get_all_data()
+        dsasa = list(d.dSASA)                  # [total, prot-side, rna-side]
+        dh = list(d.dhSASA)
+        total = float(dsasa[0]) if dsasa else None
+        hphobic = float(dh[0]) if dh else None
+        out = {
+            "dsasa_total": round(total, 2) if total is not None else None,
+            "dsasa_hphobic": round(hphobic, 2) if hphobic is not None else None,
+            "dsasa_polar": (round(total - hphobic, 2)
+                            if (total is not None and hphobic is not None) else None),
+            "dsasa_hphobic_frac": (round(hphobic / total, 4)
+                                   if (total and hphobic is not None) else None),
+            "sc_value": round(float(d.sc_value), 4) if _CFG["sc"] else None,
+            "packstat": round(float(d.packstat), 4) if _CFG["packstat"] else None,
+            "delta_unsat_hbonds": int(d.delta_unsat_hbonds),
+        }
+        if _CFG["hbonds"]:
+            # Reuse the SAME pose IAM just loaded/scored: count interface H-bonds
+            # (protein<->nucleic-acid) here instead of hbonds_pyrosetta reloading it.
+            from pyrosetta.rosetta.core.scoring.hbonds import HBondSet, fill_hbond_set
+            _SF(pose)
+            pose.update_residue_neighbors()
+            hb = HBondSet()
+            fill_hbond_set(pose, False, hb)
+            nhb = 0
+            for k in range(1, hb.nhbonds() + 1):
+                b = hb.hbond(k)
+                rd = pose.residue(b.don_res())
+                ra = pose.residue(b.acc_res())
+                d_na = rd.is_RNA() or rd.is_DNA()
+                a_na = ra.is_RNA() or ra.is_DNA()
+                if (rd.is_protein() and a_na) or (ra.is_protein() and d_na):
+                    nhb += 1
+            out[HBOND_COL] = nhb
+        return path, out
+    except Exception:
+        return path, None
+
+
+def _farep_value(pose):
+    """Weighted interface fa_rep (Rosetta repulsive energy) = bound − Σ separated chains.
+    Higher = more steric clashing at the protein–RNA interface."""
+    from pyrosetta.rosetta.core.scoring import ScoreType
+    _SF(pose)
+    rep_b = pose.energies().total_energies()[ScoreType.fa_rep]
+    rep_s = 0.0
+    for c in pose.split_by_chain():
+        _SF(c)
+        rep_s += c.energies().total_energies()[ScoreType.fa_rep]
+    return round(_SF.weights()[ScoreType.fa_rep] * (rep_b - rep_s), 2)
+
+
+def _farep_one(path):
+    """(path, {'interface_fa_rep': v}) — lightweight fa_rep-only pass (no InterfaceAnalyzer)."""
+    import pyrosetta
+    try:
+        return path, {"interface_fa_rep": _farep_value(pyrosetta.pose_from_file(resolve(path)))}
+    except Exception:
+        return path, None
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--csv", required=True, help="metrics CSV to update (in place by default)")
+    ap.add_argument("--output", default=None, help="write here instead of overwriting --csv")
+    ap.add_argument("--path-col", default=PATH_COL_DEFAULT,
+                    help=f"column holding CIF paths (default: {PATH_COL_DEFAULT})")
+    ap.add_argument("--jobs", type=int, default=min(8, os.cpu_count() or 1))
+    ap.add_argument("--no-packstat", action="store_true",
+                    help="skip packstat (the slowest term) -- for very large runs")
+    ap.add_argument("--no-sc", action="store_true", help="skip shape complementarity")
+    ap.add_argument("--with-hbonds", action="store_true",
+                    help="also count interface H-bonds on the SAME pose "
+                         "(fuses hbonds_pyrosetta.py in -> one pose load, not two)")
+    ap.add_argument("--resume", action="store_true",
+                    help="only (re)compute rows whose result column is still blank; "
+                         "keep already-filled rows untouched")
+    ap.add_argument("--farep-only", action="store_true",
+                    help="compute ONLY interface_fa_rep (fast; no InterfaceAnalyzer/packstat) "
+                         "— for backfilling datasets that already have the dSASA columns")
+    ap.add_argument("--progress", action="store_true")
+    args = ap.parse_args()
+    _CFG["packstat"] = not args.no_packstat
+    _CFG["sc"] = not args.no_sc
+    _CFG["hbonds"] = args.with_hbonds
+    worker = _farep_one if args.farep_only else _analyze_one
+    cols = list(COLS_FAREP if args.farep_only else COLS)
+    if args.with_hbonds and not args.farep_only:
+        cols.append(HBOND_COL)
+    resume_col = "interface_fa_rep" if args.farep_only else "dsasa_total"
+
+    with open(args.csv, newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        fieldnames = list(reader.fieldnames or [])
+    if args.path_col not in fieldnames:
+        sys.exit(f"--path-col '{args.path_col}' not in CSV columns")
+    for c in cols:
+        if c not in fieldnames:
+            fieldnames.append(c)
+
+    done = set()
+    if args.resume and resume_col in fieldnames:
+        done = {r.get(args.path_col, "") for r in rows
+                if str(r.get(resume_col, "")).strip() not in ("", "nan")}
+    paths = sorted({r.get(args.path_col, "") for r in rows
+                    if r.get(args.path_col) and r.get(args.path_col) not in done})
+    print(f"{len(rows)} rows, {len(paths)} structures to compute"
+          + (f" ({len(done)} already filled, skipped)" if args.resume else "")
+          + f", jobs={args.jobs}, packstat={_CFG['packstat']}, sc={_CFG['sc']}", file=sys.stderr)
+
+    res = {}
+    n_err = 0
+    if args.jobs > 1:
+        with Pool(args.jobs, initializer=_worker_init) as pool:
+            for i, (path, m) in enumerate(pool.imap_unordered(worker, paths, chunksize=4)):
+                res[path] = m
+                n_err += int(m is None)
+                if args.progress and i % 200 == 0:
+                    print(f"  {i}/{len(paths)} structures", file=sys.stderr)
+    else:
+        _worker_init()
+        for i, path in enumerate(paths):
+            _, m = worker(path)
+            res[path] = m
+            n_err += int(m is None)
+            if args.progress and i % 200 == 0:
+                print(f"  {i}/{len(paths)} structures", file=sys.stderr)
+
+    n_filled = 0
+    for r in rows:
+        pth = r.get(args.path_col, "")
+        if args.resume and pth in done:          # keep the already-filled value
+            n_filled += 1
+            continue
+        m = res.get(pth)
+        for c in cols:
+            r[c] = "" if (not m or m.get(c) is None) else m[c]
+        if m:
+            n_filled += 1
+
+    out = args.output or args.csv
+    tmp = out + ".tmp"
+    with open(tmp, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(rows)
+    os.replace(tmp, out)
+    print(f"Wrote {len(cols)} interface cols for {n_filled}/{len(rows)} rows "
+          f"({n_err} structures failed) -> {out}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

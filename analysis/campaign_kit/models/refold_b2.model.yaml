@@ -1,0 +1,26 @@
+# EXAMPLE refold model — Boltz-2 (from code/configs/refold__b2/default.yaml).
+name: refold_b2
+kind: refold
+container:
+  sif: ${shared}/containers/boltz2.sif
+  apptainer_cmd: run
+  nv: true
+  binds: ["${shared}:${shared}"]
+  cache_dir: ${shared}/${user}/.boltz_cache
+  envs: {}
+entrypoint: "boltz predict"
+params:
+  num_sampling_steps: 200
+  use_rna_msa: false
+flag_style: {boolean_flags: [], render: "--{key} {value}"}
+per_unit_seed: false
+io:
+  needs: [design_cif, rna_sequence]
+  emits: refold_b2/
+  units_per_job: 1
+compat_hints:
+  min_arch: sm_75              # smallest footprint refolder — the only one that fits an 11G 2080Ti
+  vram_g: 4.5                  # ~4.5G measured; kept off scarce gpuhe so AF3/ESM get them
+  sec_per_unit: 4320           # ~1.2h/leaf; fits the 4h... but policy = 6h .bulk
+probe:
+  jobname_match: "(refold_b2|rfb2)"

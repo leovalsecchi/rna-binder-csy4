@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Build a flat, one-level symlink view of a run's design + refold CIFs.
+
+Creates  <RUN>/<view>/  (default view name: "cifs") with one subdir per source:
+
+    designs/     -> the design .cif.gz files          (1 per design)
+    af_msaoff/   -> AF3 msa-off refold cifs           (all samples + _top)
+    af_msaon/    -> AF3 msa-on  refold cifs
+    b2_msaoff/   -> Boltz-2 refold cifs               (all samples)
+
+…and one subdir per (refolder × msa mode) that actually exists in the run, so
+new modes are picked up automatically. Links are RELATIVE so the view resolves
+both on Euler and through the /Volumes/eulermount sshfs mount. Nothing is copied
+— these are symlinks, so no extra disk and no stale duplicates.
+
+Link names are normalised to "<DESIGN>_<tag>.cif" (tag = sampleN or top) so the
+same design lines up across all refold dirs. Designs keep their .cif.gz name.
+
+    make_cif_view.py RUN_DIR [--view cifs]
+
+Idempotent: the view dir is fully regenerated each run (it only ever contains
+our symlinks).
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import sys
+from pathlib import Path
+
+# refold_<key> on disk -> short prefix used in the view subdir name
+_REFOLDERS = {"af3": "af", "b2": "b2"}
+
+
+def _view_name(src_filename: str) -> str:
+    """Normalise a refold cif filename to '<DESIGN>_<tag>.cif'.
+
+    AF3: <DESIGN>_AF3_seed<S>_sample<N>.cif -> <DESIGN>_sample<N>.cif
+         <DESIGN>_AF3_top.cif              -> <DESIGN>_top.cif
+    B2:  <DESIGN>_B2_sample<N>.cif         -> <DESIGN>_sample<N>.cif
+    """
+    base = src_filename[:-4] if src_filename.endswith(".cif") else src_filename
+    for tag in ("_AF3_", "_B2_"):
+        if tag in base:
+            design, rest = base.split(tag, 1)
+            if rest == "top":
+                suffix = "top"
+            else:
+                m = re.search(r"sample(\d+)", rest)
+                suffix = f"sample{m.group(1)}" if m else rest
+            return f"{design}_{suffix}.cif"
+    return src_filename  # unrecognised — keep original name
+
+
+def _link(target: Path, link_path: Path) -> None:
+    """Create a RELATIVE symlink at link_path pointing to target."""
+    rel = os.path.relpath(target, start=link_path.parent)
+    if link_path.is_symlink() or link_path.exists():
+        link_path.unlink()
+    link_path.symlink_to(rel)
+
+
+def _link_dir(src_dir: Path, view_sub: Path, pattern: str, rename: bool) -> int:
+    if not src_dir.is_dir():
+        return 0
+    view_sub.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for f in sorted(src_dir.glob(pattern)):
+        if not f.is_file():
+            continue
+        name = _view_name(f.name) if rename else f.name
+        _link(f, view_sub / name)
+        n += 1
+    return n
+
+
+def build_view(run_dir: str, view_name: str = "cifs") -> dict:
+    run = Path(run_dir)
+    if not run.is_dir():
+        raise SystemExit(f"run dir not found: {run}")
+    view = run / view_name
+    if view.exists():
+        shutil.rmtree(view)          # only ever holds our symlinks
+    view.mkdir(parents=True)
+
+    counts: dict[str, int] = {}
+    # 1. designs (keep .cif.gz, 1 per design)
+    counts["designs"] = _link_dir(run / "designs", view / "designs", "*.cif.gz", rename=False)
+    # 2. refolds: one view subdir per (refolder × msa mode) present on disk
+    for key, prefix in _REFOLDERS.items():
+        root = run / f"refold_{key}"
+        if not root.is_dir():
+            continue
+        for msa_dir in sorted(root.iterdir()):
+            src = msa_dir / "designs"
+            if not src.is_dir():
+                continue
+            sub = f"{prefix}_{msa_dir.name}"          # e.g. af_msaoff, b2_msaoff
+            counts[sub] = _link_dir(src, view / sub, "*.cif", rename=True)
+    return counts
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("run_dir", help="a design run dir (parent of designs/ + refold_*/)")
+    ap.add_argument("--view", default="cifs", help="name of the view dir (default: cifs)")
+    args = ap.parse_args(argv)
+    counts = build_view(args.run_dir, args.view)
+    total = sum(counts.values())
+    print(f"Built {args.run_dir}/{args.view}/ with {total} symlinks:")
+    for k, v in counts.items():
+        print(f"  {k:<14} {v}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

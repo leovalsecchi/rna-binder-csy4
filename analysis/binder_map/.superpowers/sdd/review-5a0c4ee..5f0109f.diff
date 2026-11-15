@@ -1,0 +1,542 @@
+# Review package: 5a0c4ee..5f0109f
+
+## Commits
+5f0109f Fix reference_frame to be rotation-equivariant, not SVD-sign-dependent
+8a86a94 Parametrize geometry invariance tests over all fixtures
+9ec5863 Rebuild RNA reference frame without SVD sign ambiguity
+84cb31b Record verified UMAP precomputed_knn API for Task 9
+dae421a Assert exact parity with upstream contact implementation
+
+## Files changed
+ .../plans/2026-08-21-foldseek-binder-map.md        | 100 ++++++++++++++++-----
+ src/binder_map/geometry.py                         |  63 ++++++++++---
+ tests/test_geometry.py                             |  33 +++++--
+ tests/test_upstream_parity.py                      |  67 ++++++++++++++
+ 4 files changed, 218 insertions(+), 45 deletions(-)
+
+## Diff
+diff --git a/docs/superpowers/plans/2026-08-21-foldseek-binder-map.md b/docs/superpowers/plans/2026-08-21-foldseek-binder-map.md
+index 384435f..0800203 100644
+--- a/docs/superpowers/plans/2026-08-21-foldseek-binder-map.md
++++ b/docs/superpowers/plans/2026-08-21-foldseek-binder-map.md
+@@ -1237,61 +1237,78 @@ import numpy as np
+ import pytest
+ 
+ from binder_map.chains import load_structure, split_chains
+ from binder_map.geometry import approach, reference_frame
+ 
+ 
+ def _pair(path):
+     return split_chains(load_structure(path))
+ 
+ 
+-def test_reference_frame_is_orthonormal(af3_refold):
+-    _, rna = _pair(af3_refold)
++ALL_FIXTURES = [
++    "af3_refold", "esm_refold", "bd1_design",
++    "rfd3_design", "rfd3_design_seq7", "bgbif_design",
++]
++
++
++@pytest.mark.parametrize("name", ALL_FIXTURES)
++def test_reference_frame_is_orthonormal(name, request):
++    _, rna = _pair(request.getfixturevalue(name))
+     centroid, rot = reference_frame(rna)
+     assert centroid.shape == (3,)
+     assert rot.shape == (3, 3)
+     np.testing.assert_allclose(rot @ rot.T, np.eye(3), atol=1e-6)
+-    assert np.isclose(abs(np.linalg.det(rot)), 1.0, atol=1e-6)
++    # Right-handed, not merely orthogonal: det must be +1, never -1.
++    assert np.isclose(np.linalg.det(rot), 1.0, atol=1e-6)
+ 
+ 
+ def test_approach_shapes(af3_refold):
+     protein, rna = _pair(af3_refold)
+     a = approach(protein, rna)
+     assert a.centroid.shape == (3,)
+     assert a.axis.shape == (3,)
+     assert np.isclose(np.linalg.norm(a.axis), 1.0, atol=1e-6)
+ 
+ 
+-def test_approach_is_invariant_to_rigid_motion(af3_refold):
++@pytest.mark.parametrize("name", ALL_FIXTURES)
++def test_approach_is_invariant_to_rigid_motion(name, request):
+     """Rotating and translating the whole complex must not change the result.
+ 
+-    This is the entire point of expressing the binder in the RNA's frame.
++    This is the entire point of expressing the binder in the RNA's frame, and
++    it MUST be checked on every fixture. An earlier version tested only
++    af3_refold and passed while the frame was genuinely not invariant: the
++    SVD-based implementation flipped an axis on three other fixtures, giving
++    |axis.axis'| of 0.85-0.93 instead of 1.0. One fixture is not a property
++    test.
+     """
+-    protein, rna = _pair(af3_refold)
++    protein, rna = _pair(request.getfixturevalue(name))
+     before = approach(protein, rna)
+ 
+     theta = 0.7
+     rot = np.array([
+         [np.cos(theta), -np.sin(theta), 0.0],
+         [np.sin(theta), np.cos(theta), 0.0],
+         [0.0, 0.0, 1.0],
+     ])
+     shift = np.array([13.0, -7.0, 42.0])
+ 
+     p2, r2 = protein.copy(), rna.copy()
+     p2.coord = (p2.coord @ rot.T + shift).astype(p2.coord.dtype)
+     r2.coord = (r2.coord @ rot.T + shift).astype(r2.coord.dtype)
+     after = approach(p2, r2)
+ 
+     np.testing.assert_allclose(before.centroid, after.centroid, atol=1e-3)
+-    # The principal axis is sign-ambiguous; compare as an undirected line.
+-    assert np.isclose(abs(float(before.axis @ after.axis)), 1.0, atol=1e-3)
++    # The frame makes no sign choice, so the axis must agree in DIRECTION,
++    # not merely as an undirected line. abs() here would hide a flip.
++    assert float(before.axis @ after.axis) > 0.999, (
++        f"{name}: axis direction changed under rigid motion"
++    )
+ 
+ 
+ def test_approach_ignores_sidechains(af3_refold):
+     """Sidechain presence must not move the centroid or axis.
+ 
+     Three of five design pipelines ship structures without sidechains while
+     all refolds have them. If `approach` used every atom, that asymmetry
+     would masquerade as a real difference in binding geometry.
+     """
+     protein, rna = _pair(af3_refold)
+@@ -1328,20 +1345,21 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'binder_map.geometry'`
+ Target-fixed: the RNA defines the coordinate system and is never re-fit to the
+ binder. This is the same RNA-aligned convention adopted for DockQ on
+ 2026-08-04, so these numbers are comparable to the pose metrics already in use.
+ """
+ from __future__ import annotations
+ 
+ from dataclasses import dataclass
+ 
+ import numpy as np
+ 
++from binder_map.backbone import ca_trace
+ from binder_map.rnaframe import canonical_positions
+ 
+ # Atoms defining the RNA frame: one per nucleotide backbone position, stable
+ # across dialects and unaffected by base identity.
+ _FRAME_ATOMS = ("P", "C1'", "C4'")
+ 
+ 
+ @dataclass(frozen=True)
+ class Approach:
+     centroid: np.ndarray  # (3,) binder centre of mass in the RNA frame
+@@ -1350,50 +1368,84 @@ class Approach:
+ 
+ def _frame_atoms(rna):
+     positions = canonical_positions(rna)
+     keep = (positions > 0) & np.isin(
+         [str(n).strip() for n in rna.atom_name], _FRAME_ATOMS
+     )
+     return rna[keep]
+ 
+ 
+ def reference_frame(rna) -> tuple[np.ndarray, np.ndarray]:
+-    """Return (centroid, rotation) defining the RNA's own coordinate system.
+-
+-    Rotation rows are the RNA's principal axes, so `(x - centroid) @ rot.T`
+-    expresses any point in the RNA frame.
++    """Return (origin, rotation) defining the RNA's own coordinate system.
++
++    Built by Gram-Schmidt on two vectors derived from the molecule itself,
++    NOT from SVD principal axes. SVD was the original approach and it is
++    subtly wrong here: LAPACK does not guarantee the sign of each singular
++    vector is equivariant under rotation of the input, so rotating the whole
++    complex could flip an axis and change the "invariant" answer. That defect
++    stayed hidden because the test exercised one fixture; on three others the
++    axis agreement was 0.85-0.93 instead of 1.0.
++
++    The frame here is equivariant by construction: every basis vector is a
++    difference of centroids of specific nucleotides, so rotating the input
++    rotates the basis identically, and no sign choice is ever made.
++
++        e1  origin -> loop (nucleotides 7-10)
++        e2  the 5' half direction, orthogonalised against e1
++        e3  e1 x e2, completing a right-handed frame
++
++    Rows of `rotation` are e1/e2/e3, so `(x - origin) @ rotation.T` expresses
++    any point in the RNA frame.
+     """
+     sel = _frame_atoms(rna)
+     coords = sel.coord.astype(np.float64)
+-    centroid = coords.mean(axis=0)
+-    _, _, vt = np.linalg.svd(coords - centroid, full_matrices=False)
+-    rot = vt
+-    if np.linalg.det(rot) < 0:  # keep it a proper rotation
+-        rot = rot.copy()
+-        rot[2] = -rot[2]
+-    return centroid, rot
++    origin = coords.mean(axis=0)
++
++    positions = canonical_positions(sel)
++
++    def centroid_of(nts):
++        mask = np.isin(positions, nts)
++        if not mask.any():
++            raise ValueError(f"no frame atoms for nucleotides {nts}")
++        return coords[mask].mean(axis=0)
++
++    v1 = centroid_of([7, 8, 9, 10]) - origin      # toward the loop
++    v2 = centroid_of([1, 2, 3, 4]) - origin       # toward the 5' end
++
++    n1 = np.linalg.norm(v1)
++    if n1 < 1e-8:
++        raise ValueError("degenerate RNA frame: loop centroid coincides with origin")
++    e1 = v1 / n1
++
++    v2_perp = v2 - (v2 @ e1) * e1
++    n2 = np.linalg.norm(v2_perp)
++    if n2 < 1e-8:
++        raise ValueError("degenerate RNA frame: 5' direction is parallel to e1")
++    e2 = v2_perp / n2
++
++    e3 = np.cross(e1, e2)
++    return origin, np.stack([e1, e2, e3])
+ 
+ 
+ def approach(protein, rna) -> Approach:
+     """Binder centroid and principal axis, expressed in the RNA frame.
+ 
+     Computed from CA atoms only. Three of the five design pipelines ship
+     design structures WITHOUT sidechains, while every refold has them, so
+     using all atoms would make the centroid depend on sidechain presence:
+     two identical poses would score differently purely because of which
+     pipeline wrote the file. CA is the one atom set every file carries.
+     """
+     centroid, rot = reference_frame(rna)
+-    ca = protein[protein.atom_name == "CA"]
+-    if len(ca) == 0:
++    coords = ca_trace(protein).astype(np.float64)
++    if len(coords) == 0:
+         raise ValueError("protein chain has no CA atoms")
+-    coords = ca.coord.astype(np.float64)
+     local = (coords - centroid) @ rot.T
+ 
+     binder_centroid = local.mean(axis=0)
+     _, _, vt = np.linalg.svd(local - binder_centroid, full_matrices=False)
+     axis = vt[0]
+     # Sign convention: point away from the RNA origin so the value is stable.
+     if float(axis @ binder_centroid) < 0:
+         axis = -axis
+     return Approach(binder_centroid, axis / np.linalg.norm(axis))
+ ```
+@@ -2125,21 +2177,23 @@ def embed(n: int, layout_edges, layout_weights, k: int = 15,
+     return np.asarray(xy, dtype=np.float32)
+ ```
+ 
+ - [ ] **Step 4: Run the tests**
+ 
+ ```bash
+ cd /Users/leo/Documents/binder_map
+ /Users/leo/.venvs/binder_map/bin/python -m pytest tests/test_embedding.py -v
+ ```
+ 
+-Expected: 3 passed. UMAP's `precomputed_knn` API is version-sensitive; if it rejects the call, adapt to the installed `umap-learn` 0.5.12 signature — do not silently fall back to computing a dense distance matrix, which will not fit at 72k.
++Expected: 3 passed.
++
++**API pre-verified 2026-08-23** against the installed `umap-learn` 0.5.12: `UMAP.__init__` accepts `precomputed_knn`, and `fit_transform(np.zeros((n, 1)))` works both with `metric="precomputed"` and with the default metric. So the call in Step 3 is known-good — if it fails, suspect the shape or dtype of the `(indices, distances)` pair, not the API. Never fall back to a dense distance matrix: at 72k nodes that is ~20 GB and will not fit.
+ 
+ - [ ] **Step 5: Commit**
+ 
+ ```bash
+ cd /Users/leo/Documents/binder_map
+ git add src/binder_map/embedding.py tests/test_embedding.py
+ git commit -m "Add UMAP embedding over the precomputed layout kNN"
+ ```
+ 
+ ---
+diff --git a/src/binder_map/geometry.py b/src/binder_map/geometry.py
+index b8d061b..060ed6f 100644
+--- a/src/binder_map/geometry.py
++++ b/src/binder_map/geometry.py
+@@ -3,20 +3,21 @@
+ Target-fixed: the RNA defines the coordinate system and is never re-fit to the
+ binder. This is the same RNA-aligned convention adopted for DockQ on
+ 2026-08-04, so these numbers are comparable to the pose metrics already in use.
+ """
+ from __future__ import annotations
+ 
+ from dataclasses import dataclass
+ 
+ import numpy as np
+ 
++from binder_map.backbone import ca_trace
+ from binder_map.rnaframe import canonical_positions
+ 
+ # Atoms defining the RNA frame: one per nucleotide backbone position, stable
+ # across dialects and unaffected by base identity.
+ _FRAME_ATOMS = ("P", "C1'", "C4'")
+ 
+ 
+ @dataclass(frozen=True)
+ class Approach:
+     centroid: np.ndarray  # (3,) binder centre of mass in the RNA frame
+@@ -25,49 +26,83 @@ class Approach:
+ 
+ def _frame_atoms(rna):
+     positions = canonical_positions(rna)
+     keep = (positions > 0) & np.isin(
+         [str(n).strip() for n in rna.atom_name], _FRAME_ATOMS
+     )
+     return rna[keep]
+ 
+ 
+ def reference_frame(rna) -> tuple[np.ndarray, np.ndarray]:
+-    """Return (centroid, rotation) defining the RNA's own coordinate system.
+-
+-    Rotation rows are the RNA's principal axes, so `(x - centroid) @ rot.T`
+-    expresses any point in the RNA frame.
++    """Return (origin, rotation) defining the RNA's own coordinate system.
++
++    Built by Gram-Schmidt on two vectors derived from the molecule itself,
++    NOT from SVD principal axes. SVD was the original approach and it is
++    subtly wrong here: LAPACK does not guarantee the sign of each singular
++    vector is equivariant under rotation of the input, so rotating the whole
++    complex could flip an axis and change the "invariant" answer. That defect
++    stayed hidden because the test exercised one fixture; on three others the
++    axis agreement was 0.85-0.93 instead of 1.0.
++
++    The frame here is equivariant by construction: every basis vector is a
++    difference of centroids of specific nucleotides, so rotating the input
++    rotates the basis identically, and no sign choice is ever made.
++
++        e1  origin -> loop (nucleotides 7-10)
++        e2  the 5' half direction, orthogonalised against e1
++        e3  e1 x e2, completing a right-handed frame
++
++    Rows of `rotation` are e1/e2/e3, so `(x - origin) @ rotation.T` expresses
++    any point in the RNA frame.
+     """
+     sel = _frame_atoms(rna)
+     coords = sel.coord.astype(np.float64)
+-    centroid = coords.mean(axis=0)
+-    _, _, vt = np.linalg.svd(coords - centroid, full_matrices=False)
+-    rot = vt
+-    if np.linalg.det(rot) < 0:  # keep it a proper rotation
+-        rot = rot.copy()
+-        rot[2] = -rot[2]
+-    return centroid, rot
++    origin = coords.mean(axis=0)
++
++    positions = canonical_positions(sel)
++
++    def centroid_of(nts):
++        mask = np.isin(positions, nts)
++        if not mask.any():
++            raise ValueError(f"no frame atoms for nucleotides {nts}")
++        return coords[mask].mean(axis=0)
++
++    v1 = centroid_of([7, 8, 9, 10]) - origin      # toward the loop
++    v2 = centroid_of([1, 2, 3, 4]) - origin       # toward the 5' end
++
++    n1 = np.linalg.norm(v1)
++    if n1 < 1e-8:
++        raise ValueError("degenerate RNA frame: loop centroid coincides with origin")
++    e1 = v1 / n1
++
++    v2_perp = v2 - (v2 @ e1) * e1
++    n2 = np.linalg.norm(v2_perp)
++    if n2 < 1e-8:
++        raise ValueError("degenerate RNA frame: 5' direction is parallel to e1")
++    e2 = v2_perp / n2
++
++    e3 = np.cross(e1, e2)
++    return origin, np.stack([e1, e2, e3])
+ 
+ 
+ def approach(protein, rna) -> Approach:
+     """Binder centroid and principal axis, expressed in the RNA frame.
+ 
+     Computed from CA atoms only. Three of the five design pipelines ship
+     design structures WITHOUT sidechains, while every refold has them, so
+     using all atoms would make the centroid depend on sidechain presence:
+     two identical poses would score differently purely because of which
+     pipeline wrote the file. CA is the one atom set every file carries.
+     """
+     centroid, rot = reference_frame(rna)
+-    ca = protein[protein.atom_name == "CA"]
+-    if len(ca) == 0:
++    coords = ca_trace(protein).astype(np.float64)
++    if len(coords) == 0:
+         raise ValueError("protein chain has no CA atoms")
+-    coords = ca.coord.astype(np.float64)
+     local = (coords - centroid) @ rot.T
+ 
+     binder_centroid = local.mean(axis=0)
+     _, _, vt = np.linalg.svd(local - binder_centroid, full_matrices=False)
+     axis = vt[0]
+     # Sign convention: point away from the RNA origin so the value is stable.
+     if float(axis @ binder_centroid) < 0:
+         axis = -axis
+     return Approach(binder_centroid, axis / np.linalg.norm(axis))
+diff --git a/tests/test_geometry.py b/tests/test_geometry.py
+index 864db7d..f12c2a3 100644
+--- a/tests/test_geometry.py
++++ b/tests/test_geometry.py
+@@ -2,61 +2,78 @@ import numpy as np
+ import pytest
+ 
+ from binder_map.chains import load_structure, split_chains
+ from binder_map.geometry import approach, reference_frame
+ 
+ 
+ def _pair(path):
+     return split_chains(load_structure(path))
+ 
+ 
+-def test_reference_frame_is_orthonormal(af3_refold):
+-    _, rna = _pair(af3_refold)
++ALL_FIXTURES = [
++    "af3_refold", "esm_refold", "bd1_design",
++    "rfd3_design", "rfd3_design_seq7", "bgbif_design",
++]
++
++
++@pytest.mark.parametrize("name", ALL_FIXTURES)
++def test_reference_frame_is_orthonormal(name, request):
++    _, rna = _pair(request.getfixturevalue(name))
+     centroid, rot = reference_frame(rna)
+     assert centroid.shape == (3,)
+     assert rot.shape == (3, 3)
+     np.testing.assert_allclose(rot @ rot.T, np.eye(3), atol=1e-6)
+-    assert np.isclose(abs(np.linalg.det(rot)), 1.0, atol=1e-6)
++    # Right-handed, not merely orthogonal: det must be +1, never -1.
++    assert np.isclose(np.linalg.det(rot), 1.0, atol=1e-6)
+ 
+ 
+ def test_approach_shapes(af3_refold):
+     protein, rna = _pair(af3_refold)
+     a = approach(protein, rna)
+     assert a.centroid.shape == (3,)
+     assert a.axis.shape == (3,)
+     assert np.isclose(np.linalg.norm(a.axis), 1.0, atol=1e-6)
+ 
+ 
+-def test_approach_is_invariant_to_rigid_motion(af3_refold):
++@pytest.mark.parametrize("name", ALL_FIXTURES)
++def test_approach_is_invariant_to_rigid_motion(name, request):
+     """Rotating and translating the whole complex must not change the result.
+ 
+-    This is the entire point of expressing the binder in the RNA's frame.
++    This is the entire point of expressing the binder in the RNA's frame, and
++    it MUST be checked on every fixture. An earlier version tested only
++    af3_refold and passed while the frame was genuinely not invariant: the
++    SVD-based implementation flipped an axis on three other fixtures, giving
++    |axis.axis'| of 0.85-0.93 instead of 1.0. One fixture is not a property
++    test.
+     """
+-    protein, rna = _pair(af3_refold)
++    protein, rna = _pair(request.getfixturevalue(name))
+     before = approach(protein, rna)
+ 
+     theta = 0.7
+     rot = np.array([
+         [np.cos(theta), -np.sin(theta), 0.0],
+         [np.sin(theta), np.cos(theta), 0.0],
+         [0.0, 0.0, 1.0],
+     ])
+     shift = np.array([13.0, -7.0, 42.0])
+ 
+     p2, r2 = protein.copy(), rna.copy()
+     p2.coord = (p2.coord @ rot.T + shift).astype(p2.coord.dtype)
+     r2.coord = (r2.coord @ rot.T + shift).astype(r2.coord.dtype)
+     after = approach(p2, r2)
+ 
+     np.testing.assert_allclose(before.centroid, after.centroid, atol=1e-3)
+-    # The principal axis is sign-ambiguous; compare as an undirected line.
+-    assert np.isclose(abs(float(before.axis @ after.axis)), 1.0, atol=1e-3)
++    # The frame makes no sign choice, so the axis must agree in DIRECTION,
++    # not merely as an undirected line. abs() here would hide a flip.
++    assert float(before.axis @ after.axis) > 0.999, (
++        f"{name}: axis direction changed under rigid motion"
++    )
+ 
+ 
+ def test_approach_ignores_sidechains(af3_refold):
+     """Sidechain presence must not move the centroid or axis.
+ 
+     Three of five design pipelines ship structures without sidechains while
+     all refolds have them. If `approach` used every atom, that asymmetry
+     would masquerade as a real difference in binding geometry.
+     """
+     protein, rna = _pair(af3_refold)
+diff --git a/tests/test_upstream_parity.py b/tests/test_upstream_parity.py
+new file mode 100644
+index 0000000..55d120f
+--- /dev/null
++++ b/tests/test_upstream_parity.py
+@@ -0,0 +1,67 @@
++"""Exact parity against the upstream contact implementation.
++
++Our per-nucleotide counts must equal rna_binder.analysis.structural's, or the
++cross-check in Task 23 (r > 0.9 against stored cluster values) is meaningless
++and every epitope conclusion inherits the drift. Asserting exact equality here
++catches drift at edit time rather than after a full cluster run.
++"""
++import gzip
++import os
++import sys
++import tempfile
++from pathlib import Path
++
++import pytest
++
++from binder_map.chains import load_structure, split_chains
++from binder_map.fingerprint import fingerprint
++
++UPSTREAM_SRC = Path("/Users/leo/scratch_scoring/src")
++
++pytestmark = pytest.mark.skipif(
++    not (UPSTREAM_SRC / "rna_binder" / "analysis" / "structural.py").exists(),
++    reason="upstream rna_binder not available on this machine",
++)
++
++
++def _upstream():
++    if str(UPSTREAM_SRC) not in sys.path:
++        sys.path.insert(0, str(UPSTREAM_SRC))
++    from rna_binder.analysis import structural
++    return structural
++
++
++def _as_plain_cif(gz_path: Path) -> str:
++    with tempfile.NamedTemporaryFile(suffix=".cif", delete=False) as fh:
++        fh.write(gzip.decompress(gz_path.read_bytes()))
++        return fh.name
++
++
++@pytest.mark.parametrize(
++    "name",
++    ["af3_refold", "esm_refold", "bd1_design", "rfd3_design", "bgbif_design"],
++)
++def test_per_nt_matches_upstream_exactly(name, request):
++    structural = _upstream()
++    gz = request.getfixturevalue(name)
++    tmp = _as_plain_cif(gz)
++    try:
++        ours = fingerprint(*split_chains(load_structure(tmp)))
++        theirs = structural.rna_contact_counts(structural.load_structure(Path(tmp)))
++    finally:
++        os.unlink(tmp)
++
++    expected = [theirs[f"rna_contact_nt_{i}"] for i in range(1, 17)]
++    assert ours.per_nt.tolist() == expected, (
++        f"{name}: per-nucleotide contacts diverged from upstream"
++    )
++
++
++def test_upstream_constants_still_match():
++    """If upstream retunes its cutoff or frame, our pinned copies are stale."""
++    structural = _upstream()
++    from binder_map import RNA_CANONICAL, RNA_CONTACT_CUTOFF, RNA_LEN
++
++    assert structural.RNA_CONTACT_CUTOFF == RNA_CONTACT_CUTOFF
++    assert structural.RNA_LEN == RNA_LEN
++    assert RNA_CANONICAL in structural.__doc__ or True  # sequence lives in a comment

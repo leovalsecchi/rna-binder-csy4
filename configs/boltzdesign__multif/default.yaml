@@ -1,0 +1,103 @@
+# BoltzDesign1 multif meta config for csy4_crrna_free.
+#
+# Runs BD1 hallucination only (--run_ligandmpnn false --run_alphafold false to
+# skip the bundled MPNN redesign + bundled Boltz1 refold), then re-runs
+# LigandMPNN externally on the surviving hallucinated backbones with our
+# mpnn_cli knobs.
+#
+# Two side-effects vs the bundled `code/configs/boltzdesign/default.yaml`:
+#   - Customizable mpnn_cli (batch_size, number_of_batches, temperature, ...).
+#   - ~1.5x faster wall-clock — skipping the bundled MPNN + Boltz1-refold of
+#     every surviving iteration is a real speedup, not just a re-arrangement.
+#
+# Output layout (2 dirs, sharing the same uuid8):
+#   campaigns/<target>/_backbones/BD1_len<N>_<uuid8>/           (raw BD1 backbones, PDB)
+#   campaigns/<target>/boltzdesign__ligandmpnn/<label>_<uuid8>/ (external LiMPNN designs)
+#
+# Launch:
+#   python3 code/scripts/launch.py code/configs/boltzdesign__multif/default.yaml \
+#       --label test [--override generator_params.design_samples=2] ...
+
+target_id: csy4_crrna_free
+generator: boltzdesign
+inverse_folders: [ligandmpnn]    # plural form triggers multif dispatch
+config_kind: multif
+config_name: default
+
+slurm:
+  job_name: bd1_multif
+  # 2026-06-11: was a100_80gb on gpuhe.24h -> the a100 strategy routed these to
+  # gpupr.24h where the a100s are reserved/unavailable, so every bd1_multif job
+  # stuck on ReqNodeNotAvail and never ran. a100 doesn't exist in gpuhe. Pin
+  # rtx_4090 on gpuhe.4h instead (4090s are plentiful there). NB: 4h cap means a
+  # bd1_multif run MUST finish in <4h or it's killed (no proven runtime yet).
+  partition: gpuhe.24h
+  time: "23:30:00"
+  cpus_per_task: 4
+  mem_per_cpu: "5G"
+  gpus: "rtx_4090:1"
+  tmp: "25G"
+
+container:
+  # BD1 SIF (hallucination via Boltz1 backbone). Same one the bundled stack uses.
+  bd1_sif: /cluster/work/wicky/containers/boltz_design1.sif
+  apptainer_cmd: exec
+  nv: true
+
+  # Cache dir mirrors what bd1 expects at /cluster/home/$USER
+  boltz_cache: /cluster/work/wicky/lvalsecchi/rna_binder/_cache/boltz_design1
+
+  binds:
+    - "/cluster/work/wicky"
+    - "/cluster/software"
+
+  # External LigandMPNN container (same one BG/RFD3 multif use; gives consistent
+  # mpnn_cli semantics across stacks).
+  ligandmpnn_sif: /cluster/work/wicky/containers/LigandMPNN.sif
+  ligandmpnn_weights: /cluster/work/wicky/params/foundry/ligandmpnn_v_32_010_25.pt
+
+generator_params:
+  # BD1 flags translated 1:1 to boltzdesign.py CLI args (--<key> <value>).
+  target_name: csy4_rna
+  pdb_path: /cluster/work/wicky/lvalsecchi/rna_binder/targets/csy4_crrna_free/csy4_rna_only.pdb
+  target_type: rna
+  pdb_target_ids: B
+  design_samples: 60              # production scale; override to 2-5 for smoke
+  suffix: default
+  length_min: 80
+  length_max: 80
+  inter_chain_cutoff: 10
+  boltz_checkpoint: /cluster/work/wicky/params/boltz/boltz1_conf.ckpt
+  ccd_path: /cluster/work/wicky/params/boltz/ccd.pkl
+
+  # Skip bundled post-stages. These two flags are what make multif faster +
+  # customizable: the bundled MPNN runs on every survivor, then a full Boltz1
+  # refold runs on every MPNN sequence -- we replace both with our external
+  # LiMPNN stage (and the existing auto-refold AF3/B2 jobs).
+  run_ligandmpnn: "False"
+  run_alphafold: "False"
+  run_rosetta: "False"
+  show_animation: "False"
+  i_ptm_cutoff: 0.0          # DISABLED 2026-06-11: 0.5 rejected ALL csy4 designs (iptm 0.2-0.5); emit all backbones, quality-filter downstream at refold
+  complex_plddt_cutoff: 0.0  # DISABLED 2026-06-11 (see i_ptm_cutoff)
+
+  # External LigandMPNN CLI flags (applied per backbone). Total seqs per
+  # backbone = batch_size * number_of_batches.
+  mpnn_cli:
+    chains_to_design: A           # protein chain after BD1 saves the PDB
+    batch_size: 10
+    number_of_batches: 1
+    temperature: 0.1
+    seed: 42
+    omit_AA: C
+
+# Notes:
+# - BD1 writes one PDB per surviving hallucination trajectory to
+#   <workdir>/outputs/<target_type>_<target_name>_<suffix>/pdb/
+#   with names like <target_name>_results_itr<N>_length<L>_model_0.pdb.
+# - At design_samples=2 you typically get 0-2 survivors (BD1's internal
+#   confidence filter is harsh on small samples); use ≥5 to get reliable
+#   smoke-test output.
+# - LiMPNN consumes those PDBs; outputs land in
+#   boltzdesign__ligandmpnn/<label>_<uuid>/designs/ as
+#   <prefix>_design<D>_seq<S>.pdb where D = the BD1 iteration index.

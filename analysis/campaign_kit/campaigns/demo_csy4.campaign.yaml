@@ -1,0 +1,15 @@
+name: demo_csy4
+target:
+  id: csy4_crrna_free
+  pdb: ${rb_root}/campaigns/csy4_crrna_free/csy4_rna_only.pdb
+  rna_sequence: ACUGCCGUAUAGGCAG
+stacks:
+  - {gen: rfd3,        inverse_fold: ligandmpnn, count: 2000, seed_base: 99001}
+  - {gen: halludesign, inverse_fold: ligandmpnn, count: 2000, seed_base: 99001}
+refold:
+  backends: [af3, b2]
+  msa: off
+constraints:
+  omit_residues: [C]
+  auto_refold: true
+compat: euler.compat.yaml

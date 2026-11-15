@@ -1,0 +1,362 @@
+"""Aggregator: build a DataFrame of all refold metrics across a set of source runs.
+
+Layers (per refold sample row):
+    1. filename parsing → structural metadata
+    2. refolder JSON parsing → confidence metrics (fast, default)
+    3. biotite structural metrics → physical metrics (slow, optional)
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+from typing import Iterable, Optional
+
+import pandas as pd
+
+from .parsing import parse_filename
+from .refolder_metrics import find_refolder_metrics, find_ipsae_metrics
+
+import atexit
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+
+# --- archive-aware reads (Phase 2) -------------------------------------------
+# A stage-output dir at rest may be a sibling <name>.tar.zst (see
+# code/scripts/stages/archive_pipeline.sh). _resolve_unit returns the live dir
+# if present, else expands the archive ONCE to node-local scratch (shelling out
+# to the lab `untarz`, so no python zstandard dependency). Stored paths
+# (abs_path / designed_source) are rewritten to "<archive>!<member>" for packed
+# units via _stable_ref, so the CSV stays meaningful (not an ephemeral scratch
+# path). On unpacked data both helpers are no-ops → byte-identical output.
+_ARCHIVE_SH = os.environ.get("ARCHIVE_SH", "/cluster/work/wicky/utils/files/archive.sh")
+# boltzgen.sif (where the aggregator runs) has no zstd; we stage a host copy on
+# the already-bind-mounted shared FS and put it on PATH ourselves, so packed-run
+# aggregation needs NO extra --bind in run_structural.sbatch.
+_BUNDLED_BIN = "/cluster/work/wicky/lvalsecchi/rna_binder/code/bin"
+_UNPACK_CACHE: dict = {}
+_SCRATCH_ROOT: Optional[Path] = None
+
+
+def _scratch_root() -> Path:
+    global _SCRATCH_ROOT
+    if _SCRATCH_ROOT is None:
+        _SCRATCH_ROOT = Path(tempfile.mkdtemp(prefix="agg_unpack_"))
+        atexit.register(shutil.rmtree, _SCRATCH_ROOT, ignore_errors=True)
+    return _SCRATCH_ROOT
+
+
+def _resolve_unit(unit_dir: Path) -> Optional[Path]:
+    """Readable dir for `unit_dir`: itself if present, else its sibling
+    `<unit_dir>.tar.zst` expanded once to scratch. None if neither exists."""
+    if unit_dir.exists():
+        return unit_dir
+    archive = unit_dir.with_name(unit_dir.name + ".tar.zst")
+    if not archive.exists():
+        return None
+    env = dict(os.environ)
+    env["PATH"] = _BUNDLED_BIN + os.pathsep + env.get("PATH", "")
+    if shutil.which("zstd", path=env["PATH"]) is None:
+        raise RuntimeError(
+            f"need to read {archive} but `zstd` is unavailable. Expected a bundled "
+            f"copy at {_BUNDLED_BIN}/zstd (boltzgen.sif itself has none); restore it "
+            f"(cp /usr/bin/zstd there) or add --bind /usr/bin/zstd:/usr/bin/zstd.")
+    key = str(archive)
+    if key in _UNPACK_CACHE:
+        return _UNPACK_CACHE[key]
+    dest = _scratch_root() / f"u{len(_UNPACK_CACHE)}"
+    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(
+            ["bash", "-c",
+             f"source {shlex.quote(_ARCHIVE_SH)} && cd {shlex.quote(str(dest))} "
+             f"&& untarz {shlex.quote(os.path.abspath(str(archive)))}"],
+            check=True, env=env,
+        )
+    except subprocess.CalledProcessError:
+        sys.stderr.write(f"[agg] WARN: unreadable/corrupt archive, skipping leaf: {archive}\n")
+        _UNPACK_CACHE[key] = None
+        return None
+    cached = dest / unit_dir.name
+    _UNPACK_CACHE[key] = cached
+    return cached
+
+
+def _resolve_slice(archive: Path) -> Path:
+    """Expand a per-uuid slice archive (flat members) to scratch once (cached)."""
+    key = str(archive)
+    cached = _UNPACK_CACHE.get(key)
+    if cached is None:
+        env = dict(os.environ)
+        env["PATH"] = _BUNDLED_BIN + os.pathsep + env.get("PATH", "")
+        dest = _scratch_root() / f"s{len(_UNPACK_CACHE)}"
+        dest.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["bash", "-c",
+             f"zstd -dq -c {shlex.quote(os.path.abspath(str(archive)))} | tar -x -C {shlex.quote(str(dest))}"],
+            check=True, env=env,
+        )
+        cached = dest
+        _UNPACK_CACHE[key] = cached
+    return cached
+
+
+def _stable_ref(orig_unit: Path, f: Optional[Path]) -> Optional[str]:
+    """Stable string for a resolved file: the real path when unpacked, or
+    "<archive>!<member>" when read from a packed unit (designs are flat)."""
+    if f is None:
+        return None
+    if _resolve_unit(orig_unit) == orig_unit:
+        # Live dir, but a --num-runs>1 designs/ holds per-uuid slice archives,
+        # so f may be a scratch member of a slice; ref into the slice if present.
+        m = re.search(r"_([0-9a-f]{8})_", f.name)
+        if m:
+            slice_arch = orig_unit / f"{m.group(1)}.tar.zst"
+            if slice_arch.exists():
+                return f"{slice_arch}!{f.name}"
+        return str(f)
+    archive = orig_unit.with_name(orig_unit.name + ".tar.zst")
+    return f"{archive}!{orig_unit.name}/{f.name}"
+
+
+def _find_source_design(refold_run: Path, parsed) -> Optional[Path]:
+    """Find the source design file for a given refold output.
+
+    refold_run is the run dir of the refold (e.g. <source>/refold_af3/<label>/).
+    The source designs live at <source>/designs/.
+    The parsed filename contains design_id etc; we reconstruct the source name.
+    """
+    source_designs = _resolve_unit(refold_run.parent.parent / "designs")
+    if source_designs is None:
+        return None
+    # Reconstruct source design stem from parsed metadata.
+    # Native filename: <target>_<gen>_<invfold>_len<N>_<uuid>_<axes>.<ext>
+    parts = [parsed.target, parsed.gen, parsed.invfold, f"len{parsed.length}", parsed.uuid8]
+    if parsed.cycle is not None:
+        # HD axes
+        parts.append(f"recycle{parsed.cycle}")
+        parts.append(f"sample{parsed.hd_sample}")
+        parts.append(f"pack{parsed.pack}")
+    else:
+        # Generic axes
+        parts.append(f"design{parsed.design_id}")
+        if parsed.seq_id is not None:
+            parts.append(f"seq{parsed.seq_id}")
+    stem = "_".join(parts)
+    # Try common extensions
+    for ext in [".cif.gz", ".cif", ".pdb"]:
+        candidate = source_designs / f"{stem}{ext}"
+        if candidate.exists():
+            return candidate
+    # --num-runs>1: source designs are per-uuid slice archives; expand this
+    # run's slice (cached) and look for the member there.
+    slice_arch = refold_run.parent.parent / "designs" / f"{parsed.uuid8}.tar.zst"
+    if slice_arch.exists():
+        slice_dir = _resolve_slice(slice_arch)
+        for ext in [".cif.gz", ".cif", ".pdb"]:
+            candidate = slice_dir / f"{stem}{ext}"
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def _iter_refold_samples(source_run: Path, refolders=("AF3", "B2", "ESM"), labels: Optional[list] = None):
+    """Yield (refold_run, refold_file_path, parsed) for each refold sample.
+
+    Args:
+        source_run: path to a single design run dir
+        refolders: which refolders to include (AF3, B2)
+        labels: only include refold passes with these labels; None = all
+    """
+    for refolder in refolders:
+        refold_root = source_run / f"refold_{refolder.lower()}"
+        if not refold_root.exists():
+            continue
+        for refold_run in sorted(refold_root.iterdir()):
+            if not refold_run.is_dir():
+                continue
+            if labels is not None and refold_run.name not in labels:
+                continue
+            designs_dir = _resolve_unit(refold_run / "designs")
+            if designs_dir is None:
+                continue
+            for f in sorted(designs_dir.iterdir()):
+                if not f.is_file() or not f.suffix == ".cif":
+                    continue
+                parsed = parse_filename(f.name)
+                if parsed is None or parsed.refolder != refolder:
+                    continue
+                yield refold_run, f, parsed
+
+
+def _leaf_completeness(refold_run: Path, refolder: str):
+    """(n_expected, n_present, complete) for a refold leaf. [Fix 1]
+
+    n_present = distinct source designs that produced >=1 canonical .cif.
+    n_expected = the worker's expected.json (n_source_designs), or None for legacy
+    leaves. complete iff every expected source design is present; when the expected
+    count is unknown, falls back to 'archive packed' (designs.tar.zst exists) as a
+    weaker finalized-signal. A loose leaf with no expected.json -> complete=False
+    (not finalized), so a partial preempted/timed-out leaf is no longer counted as
+    a complete result.
+    """
+    designs_dir = _resolve_unit(refold_run / "designs")
+    present = set()
+    if designs_dir is not None:
+        sep = f"_{refolder}_"
+        for f in designs_dir.iterdir():
+            if f.suffix == ".cif" and sep in f.name:
+                present.add(f.name.split(sep)[0])
+    n_present = len(present)
+    n_expected = None
+    exp = refold_run / "expected.json"
+    if exp.exists():
+        try:
+            n_expected = int(json.loads(exp.read_text())["n_source_designs"])
+        except Exception:
+            n_expected = None
+    if n_expected is not None:
+        complete = n_present >= n_expected
+    else:
+        complete = (refold_run / "designs.tar.zst").exists()
+    return n_expected, n_present, complete
+
+
+def _binder_sequence(cif_path: Path) -> Optional[str]:
+    """Binder (protein-chain) 1-letter sequence read off a refold .cif, via the
+    canonical `structural.protein_sequence` (same extractor add_binder_sequence.py
+    uses). Defensive — returns None if biotite is unavailable or the structure
+    can't be read, so it never breaks aggregation."""
+    try:
+        from .structural import load_structure, protein_sequence
+        return protein_sequence(load_structure(cif_path))
+    except Exception:
+        return None
+
+
+def aggregate_metrics(
+    source_runs: Iterable[Path | str],
+    refolders: Iterable[str] = ("AF3", "B2", "ESM"),
+    labels: Optional[list] = None,
+    structural: bool = False,
+    sequences: bool = True,
+    progress: bool = False,
+) -> pd.DataFrame:
+    """Aggregate refold metrics across one or more source runs.
+
+    Args:
+        source_runs: list of source design run dirs (e.g.
+            campaigns/csy4_crrna_free/rfd3__ligandmpnn/launchertest_b4ed9efe/)
+        refolders: which refolders to include (default both)
+        labels: only include refold passes with these labels (e.g. ["v2test"])
+        structural: also compute biotite-based structural metrics. Slow.
+        sequences: add a "binder_sequence" column (protein-chain one-letter
+            sequence read off each refold CIF). Cached per design, so it costs one
+            extra structure read per unique binder, not per sample. Needs biotite;
+            degrades to None without it.
+        progress: print one line per refold file processed
+
+    Returns:
+        Wide DataFrame, one row per refold sample.
+    """
+    if structural:
+        # Defer biotite import — heavy
+        from .structural import compute_all_structural
+
+    # Binder sequence is constant across a design's refold samples (seeds,
+    # diffusion samples, AF3 vs B2), so cache by design identity and parse one
+    # CIF per unique sequence instead of one per row.
+    seq_cache: dict = {}
+    rows = []
+    _leaf_meta: dict = {}
+    for source_run in source_runs:
+        source_run = Path(source_run)
+        if not source_run.exists():
+            continue
+        for refold_run, cif_path, parsed in _iter_refold_samples(
+            source_run, refolders=refolders, labels=labels
+        ):
+            row = parsed.to_dict()
+            row["source_run"] = str(source_run)
+            row["refold_run"] = str(refold_run)
+            row["refold_label"] = refold_run.name
+            _lk = (str(refold_run), parsed.refolder)
+            if _lk not in _leaf_meta:
+                _leaf_meta[_lk] = _leaf_completeness(refold_run, parsed.refolder)
+            (row["n_designs_expected"], row["n_designs_present"],
+             row["leaf_complete"]) = _leaf_meta[_lk]
+            # Per-uuid multif refolds use a "<msa>_<uuid8>" leaf; split out the
+            # clean MSA variant + run uuid8 so msaon-vs-msaoff grouping still works.
+            _mv = re.match(r"^(msaon|msaoff)(?:_([0-9a-f]{8}))?$", refold_run.name)
+            row["msa_variant"] = _mv.group(1) if _mv else refold_run.name
+            row["refold_uuid8"] = _mv.group(2) if (_mv and _mv.group(2)) else None
+            row["abs_path"] = _stable_ref(refold_run / "designs", cif_path)
+            if sequences:
+                seq_key = (parsed.gen, parsed.invfold,
+                           parsed.uuid8, parsed.design_id, parsed.seq_id,
+                           parsed.cycle, parsed.hd_sample, parsed.pack)
+                if seq_key not in seq_cache:
+                    seq_cache[seq_key] = _binder_sequence(cif_path)
+                row["binder_sequence"] = seq_cache[seq_key]
+            row.update(find_refolder_metrics(cif_path, parsed.refolder))
+            row.update(find_ipsae_metrics(cif_path, parsed.refolder))
+            if structural:
+                designed_path = _find_source_design(refold_run, parsed)
+                row["designed_source"] = _stable_ref(
+                    refold_run.parent.parent / "designs", designed_path)
+                row.update(compute_all_structural(cif_path, designed_path))
+            rows.append(row)
+            if progress:
+                print(f"  {parsed.refolder} {cif_path.name}")
+    return pd.DataFrame(rows)
+
+
+def aggregate_to_designs(samples_df: pd.DataFrame, agg: str = "best", metric: str = "iptm") -> pd.DataFrame:
+    """Collapse one-row-per-sample → one-row-per-design.
+
+    For wide schema with AF3 + B2 rows present, this groups by
+    (source_run, uuid8, design_id, seq_id, cycle, sample, pack, refolder) — i.e.,
+    one row per (design, refolder), aggregating across samples.
+
+    Args:
+        samples_df: output of aggregate_metrics()
+        agg: "best" (highest metric), "mean", or "median"
+        metric: which metric to use for ranking when agg="best" (default "iptm")
+
+    Returns:
+        DataFrame with one row per (source design, refolder).
+    """
+    df = samples_df.copy()
+
+    group_cols = [
+        "source_run", "stack", "uuid8",
+        "design_id", "seq_id",
+        "cycle", "hd_sample", "pack",
+        "refolder", "refold_label",
+    ]
+    # Replace NaN with sentinel so groupby treats consistently
+    df[group_cols] = df[group_cols].fillna("")
+
+    # Pick the right "iptm" column based on refolder
+    df["_rank_metric"] = df.apply(
+        lambda r: r.get(f"{r['refolder'].lower()}_iptm") if r.get("refolder") else None,
+        axis=1,
+    )
+
+    if agg == "best":
+        # Within each group, take the row with the max ranking metric
+        idx = df.groupby(group_cols)["_rank_metric"].idxmax()
+        result = df.loc[idx.dropna()].drop(columns=["_rank_metric"])
+    elif agg in ("mean", "median"):
+        # Compute mean/median of all numeric columns within each group
+        numeric_cols = df.select_dtypes(include="number").columns.tolist()
+        result = df.groupby(group_cols)[numeric_cols].agg(agg).reset_index()
+    else:
+        raise ValueError(f"Unknown agg: {agg!r}")
+
+    return result.reset_index(drop=True)

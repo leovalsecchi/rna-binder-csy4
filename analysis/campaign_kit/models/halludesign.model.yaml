@@ -1,0 +1,36 @@
+# EXAMPLE gen model (from code/configs/halludesign/random_init.yaml).
+# Paths use ${...} placeholders resolved from site.yaml — nothing account-specific is baked in.
+name: halludesign
+kind: gen
+container:
+  sif: ${rb_root}/containers/af3_protenix_esm.sif
+  apptainer_cmd: run
+  nv: true
+  binds: ["${shared}:${shared}"]
+  envs: {PYTHONPATH: "${rb_root}/vendor/protenix_pkg", CUDA_HOME: /usr/local/cuda-real}
+workdir: ${shared}/${user}/halludesign_upgrade
+entrypoint: "python ./HalluDesign_run.py"
+params:
+  HalluDesign_model: cross_model
+  random_init_chain_spec: "A:80"
+  num_designs: 1               # KEEP 1 — seed is set per-uuid (see per_unit_seed)
+  num_seqs: 10
+  num_recycles: 15
+  ref_time_steps: 60
+  mpnn: ligand_mpnn
+  fix_chain_index: B
+flag_style:
+  boolean_flags: [random_init, CoDP]
+  render: "--{key} {value}"
+per_unit_seed: true            # HalluDesign otherwise emits duplicate designs across uuids
+io:
+  needs: [rna_sequence]        # de-novo: no target pdb; injects rna into the template
+  emits: designs/
+  units_per_job: 150
+compat_hints:
+  min_arch: sm_80              # Protenix DeepSpeed Evoformer needs Ampere+ (probe confirms on sm_75)
+  vram_g: 23                   # real floor ~20-23G ('79.5G' is a JAX whole-card-grab artifact)
+  sec_per_unit: 36
+probe:
+  jobname_match: "(^|_)hd$"    # sacct JobName pattern for this model's jobs (e.g. mv7_hd, mv8_hd)
+  calib_params: {num_designs: 1, num_seqs: 2, num_recycles: 3}   # tiny override for a fast cold-probe

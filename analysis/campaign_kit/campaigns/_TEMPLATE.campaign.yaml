@@ -1,0 +1,22 @@
+# campaigns/<name>.campaign.yaml — LAYER ③ a campaign. Any labmate authors this.
+# Replaces the per-campaign submit_mv<N>_gen_*.sh shell literals (label/seeds/counts/routing).
+name: MY_CAMPAIGN               # becomes the run label; loops named refold_<name>, hd_<name>
+
+target:
+  id: my_target                 # dir under campaigns/
+  pdb: /abs/path/to/target.pdb  # target structure (omit for de-novo gens)
+  rna_sequence: ACGU…           # the RNA to co-fold at refold time
+
+stacks:                         # each = a generator (+ inverse folder) -> refold backends
+  - {gen: halludesign, inverse_fold: ligandmpnn, count: 1000, seed_base: 90001}
+  # - {gen: boltzgen,  inverse_fold: boltzif,    count: 1000, seed_base: 90001}
+
+refold:
+  backends: [af3, b2, esm]      # which refold models (must be probed & in compat.yaml)
+  msa: off                      # off = backend-comparable; on adds RNA MSA (AF3 only, not comparable)
+
+constraints:
+  omit_residues: [C]            # residues to forbid in inverse folding (e.g. cysteine)
+  auto_refold: true             # wire the refold loop automatically after gen
+
+compat: euler.compat.yaml       # which probed compatibility template to plan against

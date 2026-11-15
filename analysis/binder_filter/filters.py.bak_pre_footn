@@ -1,0 +1,364 @@
+"""filters.py — the filter-tree evaluator.
+
+A filter atom is (metric, backend, cmp, value). Atoms live in GROUPS, groups live in tiers:
+
+    atoms --(group op)--> group --(tier op)--> tier --(top-level op)--> ipTM gate
+
+The group level exists because one op per tier is too coarse. Tier 1 puts each metric in its
+own group, so sc_RMSD can be "af3 AND esm" while sc_DockQ is "af3 OR esm" — two independent
+questions that a single tier-wide op could not express.
+
+Three rules that are easy to get wrong and expensive to get wrong:
+
+1. **NaN fails closed.** A design with a missing value FAILS any filter on that metric. It is
+   never silently passed. (A filter key that silently no-ops has bitten this project before:
+   in metric_explorer a bad constraint key was skipped, so every design "passed".)
+
+2. **An empty group or tier does not filter.** With no enabled atoms it is neutral (all True)
+   under both AND and OR — not the empty-OR identity of all False, which would zero the result
+   the moment you unticked the last box.
+
+3. **Neutral ABSORBS under OR**, at every level. "no constraint OR anything" is no constraint,
+   so an empty group inside an OR neutralises its whole tier. That is correct but reads as a
+   broken filter, so `evaluate` reports it rather than just returning the full campaign.
+
+Boltz-2 cannot be referenced: the store has no b2 column and METRICS lists no b2 backend.
+"""
+from __future__ import annotations
+
+import math
+
+import numpy as np
+
+BACKENDS = ("af3", "esm")
+OPS = {
+    "<=": lambda a, v: a <= v,
+    ">=": lambda a, v: a >= v,
+    "<": lambda a, v: a < v,
+    ">": lambda a, v: a > v,
+}
+
+
+class Metric:
+    def __init__(self, key, label, unit, backends, better, tier, default, cmp):
+        self.key, self.label, self.unit = key, label, unit
+        self.backends, self.better = backends, better
+        self.tier, self.default, self.cmp = tier, default, cmp
+
+    def column(self, backend=None):
+        if not self.backends:
+            return self.key
+        if backend not in self.backends:
+            raise ValueError(f"metric {self.key} has no backend {backend!r}")
+        return f"{self.key}_{backend}"
+
+    def as_dict(self):
+        return {"key": self.key, "label": self.label, "unit": self.unit,
+                "backends": list(self.backends), "better": self.better,
+                "tier": self.tier, "default": self.default, "cmp": self.cmp}
+
+
+METRICS = {m.key: m for m in [
+    # tier 1 — the two scatter plots
+    Metric("rmsd", "sc_RMSD (pose, RNA-aligned)", "Å", BACKENDS, "lower", 1, 2.0, "<="),
+    Metric("dockq", "sc_DockQ (RNA-aligned)", "", BACKENDS, "higher", 1, 0.50, ">="),
+    # tier 2 — ipTM, handled by its own gate rather than as a tier atom
+    Metric("iptm", "ipTM", "", BACKENDS, "higher", 2, 0.80, ">="),
+    # tier 3
+    Metric("seq_kmer", "AA repeat (longest repeated k-mer)", "aa", (), "lower", 3, 6, "<="),
+    Metric("seq_run", "AA repeat (longest same-AA run)", "aa", (), "lower", 3, 5, "<="),
+    Metric("seq_max_aa_frac", "AA repeat (largest single-AA share)", "", (), "lower", 3,
+           0.35, "<="),
+    Metric("rog", "globularity (radius of gyration)", "Å", BACKENDS, "lower", 3, 15.0, "<="),
+    Metric("hb", "interface H-bond count", "", BACKENDS, "higher", 3, 2, ">="),
+    Metric("pis", "π-stacking score", "", BACKENDS, "higher", 3, 0.1, ">="),
+    # Hairpin foot clearance: how much room the binder leaves BELOW the Csy4 hairpin, where
+    # the F30 3WJ scaffold sits. Higher = more clearance. Default 3.4 Å is the heavy-atom vdW
+    # contact distance the metric itself uses as its clash cutoff.
+    #
+    # This is the TRANSPLANT estimator (user's choice 2026-08-13): the separately folded 21-nt
+    # extended hairpin superposed on the shared core. It ranks the same as the A-form
+    # continuation (r=0.95 af3 / 0.98 esm) but reads systematically ~1.2 Å TIGHTER, because its
+    # own placement error at the attachment point is ~2.1 Å. So thresholds set here are NOT
+    # transferable to A-form numbers.
+    #
+    # Two caveats that matter when using this as a gate — see the memory note for the data:
+    #   - it ANTI-correlates with interface size (r=-0.49 af3 / -0.69 esm vs ΔSASA), so a
+    #     clearance filter also selects smaller interfaces;
+    #   - af3 and esm agree poorly on it (r=0.166), so the af3/esm agreement split is worth
+    #     watching whenever this metric is on.
+    Metric("foot", "hairpin foot clearance (transplant)", "Å", BACKENDS, "higher", 3, 3.4,
+           ">="),
+    # Refolder AGREEMENT (added 2026-08-13). These have NO backend split — they ARE the
+    # comparison — so they take no `_af3`/`_esm` suffix and sit out the agreement panel.
+    #
+    #   pose_disagree  superimpose both refolds on the RNA, apply that transform to the binder,
+    #                  binder Ca RMSD with NO second fit  -> "do AF3 and ESM agree WHERE it binds?"
+    #   fold_disagree  binder-on-binder Kabsch fit         -> "do they agree WHAT it looks like?"
+    #
+    # These measure the refolders against EACH OTHER, not against the design, so they are not
+    # derivable from sc_RMSD/sc_DockQ — the triangle inequality only bounds them:
+    #     |rmsd_af3 - rmsd_esm|  <=  pose_disagree  <=  rmsd_af3 + rmsd_esm
+    # Measured orthogonality vs everything the tool already filters on: |rho| <= 0.31, and the
+    # two disagreements decouple from each other at rho=+0.23 — two filters, not one.
+    #
+    # ⚠️ Their value depends on HOW YOU GATE, because that upper bound does real work. Requiring
+    # sc_DockQ>=0.5 on BOTH refolders already forces agreement: only 3.3% of that set docks
+    # >10 A apart, vs 85% campaign-wide. Under an OR gate (either refolder) it is 59% — that is
+    # where this earns its keep, and is exactly what makes per-metric OR in tier 1 safe to use.
+    Metric("pose_disagree", "AF3↔ESM pose disagreement (RNA-aligned)", "Å", (), "lower", 3,
+           10.0, "<="),
+    Metric("fold_disagree", "AF3↔ESM fold disagreement", "Å", (), "lower", 3, 5.0, "<="),
+    # Interface size. From `dsasa_total_af3` / `_esm` — the SUFFIXED columns only; the bare
+    # `dsasa_*` consensus column folds Boltz-2 in. Higher = more buried area = bigger interface.
+    # Default 1200 Å² sits just above p25 and keeps ~73% (af3) / 76% (esm).
+    # Distribution: af3 p25 1174 / median 1486 / p75 1844; esm p25 1210 / median 1637 / p75 2078.
+    #
+    # This is the natural partner to `foot`: foot clearance ANTI-correlates with interface size
+    # (r=−0.49 af3 / −0.69 esm), so gating on foot alone quietly selects small interfaces. Band
+    # by this metric before reading anything into a foot threshold — the same trap BUNS had.
+    Metric("dsasa", "interface ΔSASA (buried area)", "Å²", BACKENDS, "higher", 3, 1200, ">="),
+]}
+
+IPTM_VALUES = {"af3": "iptm_af3", "esm": "iptm_esm",
+               "min": "iptm_min", "mean": "iptm_mean"}
+
+
+# --------------------------------------------------------------------------- atoms
+
+def finite(store, name) -> np.ndarray:
+    """Cached isfinite when the store offers one; plain isfinite otherwise (test stores)."""
+    if hasattr(store, "finite"):
+        return store.finite(name)
+    return np.isfinite(store.col(name))
+
+
+def atom_mask(store, atom) -> np.ndarray:
+    """Boolean mask for one atom. Non-finite values fail."""
+    m = METRICS.get(atom["metric"])
+    if m is None:
+        raise ValueError(f"unknown metric {atom['metric']!r}")
+    op = OPS.get(atom.get("cmp", m.cmp))
+    if op is None:
+        raise ValueError(f"unknown comparison {atom.get('cmp')!r}")
+    name = m.column(atom.get("backend"))
+    return op(store.col(name), float(atom["value"])) & finite(store, name)
+
+
+# A tier with no enabled atoms is NEUTRAL — it does not filter, under AND or OR alike.
+# Represented as None rather than an all-True array: materialising one cost a 5.3M-element
+# allocation plus a pointless AND on every request, three times over (main + both agreement
+# sides). None also makes the OR absorption below explicit instead of implied.
+NEUTRAL = None
+
+
+def _combine(masks, op):
+    if not masks:
+        return NEUTRAL
+    out = masks[0].copy()
+    for m in masks[1:]:
+        if op == "OR":
+            out |= m
+        else:
+            out &= m
+    return out
+
+
+def combine_two(a, b, op):
+    """Combine two possibly-neutral masks. Neutral means 'everything', so it is dropped under
+    AND and absorbs under OR."""
+    if op == "OR":
+        return NEUTRAL if (a is NEUTRAL or b is NEUTRAL) else (a | b)
+    if a is NEUTRAL:
+        return b
+    if b is NEUTRAL:
+        return a
+    return a & b
+
+
+def materialize(mask, n):
+    return np.ones(n, dtype=bool) if mask is NEUTRAL else mask
+
+
+def _fold(masks, op):
+    """Fold possibly-neutral masks left to right. Empty -> NEUTRAL. Seeded with the first
+    element rather than with NEUTRAL, because a NEUTRAL seed means "nothing yet" while a
+    NEUTRAL operand means "everything" — folding from one would absorb the whole OR."""
+    if not masks:
+        return NEUTRAL
+    out = masks[0]
+    for m in masks[1:]:
+        out = combine_two(out, m, op)
+    return out
+
+
+# --------------------------------------------------------------------------- groups
+
+def tier_groups(tier):
+    """Normalise a tier to a list of {key, op, atoms}.
+
+    A tier carrying only `atoms` (the shape tier 3 still uses) reads as ONE group under the
+    tier's own op, so both shapes evaluate identically and old specs keep working."""
+    gs = tier.get("groups")
+    if not gs:
+        return [{"key": "", "op": tier.get("op", "AND").upper(),
+                 "atoms": tier.get("atoms", [])}]
+    return [{"key": g.get("key", ""), "op": g.get("op", "AND").upper(),
+             "atoms": g.get("atoms", [])} for g in gs]
+
+
+def tier_atoms(tier):
+    """Every atom in a tier, whichever shape it is stored in."""
+    return [a for g in tier_groups(tier) for a in g["atoms"]]
+
+
+def op_for_metric(tier, metric_key):
+    """The AND/OR that governs one metric's atoms — which is what a plot's regions must be
+    shaded by. With per-metric groups that is the group's own op, not the tier's, so the two
+    plots can shade differently."""
+    for g in tier_groups(tier):
+        if any(a.get("metric") == metric_key for a in g["atoms"]):
+            return g["op"]
+    return tier.get("op", "AND").upper()
+
+
+def n_enabled(tier):
+    return sum(1 for a in tier_atoms(tier) if a.get("on", True))
+
+
+def tier_mask(store, tier, force_backend=None):
+    """Combine a tier's groups; NEUTRAL if nothing in it constrains. Atoms combine inside a
+    group with the group's op, groups combine with the tier's op. force_backend keeps only the
+    atoms belonging to that backend (plus backend-free ones), which is how the AF3-vs-ESM
+    agreement split is built: it uses the thresholds the user actually set on that side,
+    rather than inventing any."""
+    out = []
+    for g in tier_groups(tier):
+        atoms = [a for a in g["atoms"] if a.get("on", True)]
+        if force_backend is not None:
+            atoms = [a for a in atoms if a.get("backend") in (None, "", force_backend)]
+        out.append(_combine([atom_mask(store, a) for a in atoms], g["op"]))
+    return _fold(out, tier.get("op", "AND").upper())
+
+
+# ----------------------------------------------------------------------- ipTM gate
+
+def _top_k_mask(values, candidates, k) -> np.ndarray:
+    """Top-k by value among `candidates`. Ties at the cut are broken arbitrarily (argpartition
+    ordering), so a filter asking for exactly N gets exactly N."""
+    out = np.zeros(values.shape, dtype=bool)
+    idx = np.flatnonzero(candidates & np.isfinite(values))
+    if idx.size == 0 or k <= 0:
+        return out
+    if k >= idx.size:
+        out[idx] = True
+        return out
+    out[idx[np.argpartition(values[idx], -k)[-k:]]] = True
+    return out
+
+
+def iptm_mask(store, gate, base, force_backend=None):
+    """Apply the ipTM gate to `base` (which may be NEUTRAL). Returns (mask, info)."""
+    if not gate or not gate.get("on"):
+        return base, {"applied": False}
+
+    value = force_backend or gate.get("value", "min")
+    colname = IPTM_VALUES.get(value)
+    if colname is None:
+        raise ValueError(f"unknown ipTM value {value!r}")
+    vals = store.col(colname)
+    base = materialize(base, store.n)
+
+    if gate.get("mode", "threshold") == "threshold":
+        thr = float(gate.get("threshold", 0.8))
+        return base & (vals >= thr) & finite(store, colname), {
+            "applied": True, "mode": "threshold", "value": value, "threshold": thr}
+
+    scope = gate.get("scope", "filtered")
+    candidates = base if scope == "filtered" else np.ones(store.n, dtype=bool)
+    pool = int((candidates & np.isfinite(vals)).sum())
+    if gate.get("rank_kind", "n") == "pct":
+        pct = float(gate.get("rank_pct", 20.0))
+        k = int(math.ceil(pool * pct / 100.0))
+    else:
+        k = int(gate.get("rank_n", 10000))
+    keep = _top_k_mask(vals, candidates, k)
+    return base & keep, {"applied": True, "mode": "rank", "value": value, "scope": scope,
+                         "k": k, "pool": pool}
+
+
+# ------------------------------------------------------------------------ evaluate
+
+def evaluate(store, spec, force_backend=None):
+    """Full filter tree -> (mask, info). force_backend='af3'|'esm' restricts every
+    backend-bearing atom and the ipTM gate to that one backend."""
+    tiers = spec.get("tiers", {})
+    d1, d3 = tiers.get("t1", {}), tiers.get("t3", {})
+    t1 = tier_mask(store, d1, force_backend)
+    t3 = tier_mask(store, d3, force_backend)
+    base = combine_two(t1, t3, spec.get("combine", "AND").upper())
+    mask, ginfo = iptm_mask(store, spec.get("iptm"), base, force_backend)
+    # 'anything OR (something empty)' is logically 'everything', which is correct but
+    # surprising: you set thresholds, flip an op to OR, and the filter silently stops
+    # filtering. It can happen at the top level (tier1 OR empty tier3) and now one level
+    # lower too (an empty metric group OR'd inside a tier), so the test is "nothing
+    # constrains even though atoms are switched on", not a comparison of the two tiers.
+    neutralized = [k for k, d, m in (("t1", d1, t1), ("t3", d3, t3))
+                   if m is NEUTRAL and n_enabled(d)]
+    unfiltered_or = base is NEUTRAL and (n_enabled(d1) + n_enabled(d3)) > 0
+    mask = materialize(mask, store.n)
+    cnt = lambda m: store.n if m is NEUTRAL else int(m.sum())      # noqa: E731
+    return mask, {"n_tier1": cnt(t1), "n_tier3": cnt(t3),
+                  "n_base": cnt(base), "n_pass": int(mask.sum()), "iptm": ginfo,
+                  "unfiltered_or": bool(unfiltered_or), "neutralized": neutralized}
+
+
+def agreement_split(store, spec):
+    """How much of the yield depends on which refolder you trust. Evaluates the user's own
+    AF3-side thresholds and ESM-side thresholds separately and crosses them."""
+    a, _ = evaluate(store, spec, force_backend="af3")
+    e, _ = evaluate(store, spec, force_backend="esm")
+    return {"both": int((a & e).sum()), "af3_only": int((a & ~e).sum()),
+            "esm_only": int((~a & e).sum()), "neither": int((~a & ~e).sum()),
+            "af3_total": int(a.sum()), "esm_total": int(e.sum())}
+
+
+# ------------------------------------------------------------------------- regions
+
+def quadrants(store, metric_key, tx, ty, tier_op, pass_mask=None):
+    """The four regions a plot's two thresholds cut it into, counted over the FULL population
+    (never the display subsample). `included` marks which regions the tier's AND/OR keeps.
+
+    Designs with a NaN on either axis are unplottable and are reported separately rather than
+    being folded into a region."""
+    m = METRICS[metric_key]
+    nx, ny = m.column("af3"), m.column("esm")
+    x, y = store.col(nx), store.col(ny)
+    op = OPS[m.cmp]
+    ok = finite(store, nx) & finite(store, ny)
+    px, py = op(x, float(tx)) & ok, op(y, float(ty)) & ok
+
+    # inclusion-exclusion off three reductions, rather than building four region arrays and
+    # reducing each: the four counts are determined by |px|, |py|, |px∩py| and |ok|
+    n_ok, n_px, n_py = int(ok.sum()), int(px.sum()), int(py.sum())
+    n_both = int((px & py).sum())
+    counts = {"both": n_both, "af3_only": n_px - n_both, "esm_only": n_py - n_both,
+              "neither": n_ok - n_px - n_py + n_both}
+
+    passing = {k: None for k in counts}
+    if pass_mask is not None:
+        # the passing set is tiny next to the store, so slice down to it first and do the
+        # region arithmetic on a few thousand elements instead of a few million
+        i = np.flatnonzero(pass_mask)
+        a, b, o = px[i], py[i], ok[i]
+        p_ok, p_a, p_b = int(o.sum()), int(a.sum()), int(b.sum())
+        p_both = int((a & b).sum())
+        passing = {"both": p_both, "af3_only": p_a - p_both, "esm_only": p_b - p_both,
+                   "neither": p_ok - p_a - p_b + p_both}
+
+    keep = {"both"} if tier_op.upper() == "AND" else {"both", "af3_only", "esm_only"}
+    out = {k: {"n": c, "pct": 100.0 * c / store.n, "included": k in keep,
+               "n_passing": passing[k]} for k, c in counts.items()}
+    n_nan = store.n - n_ok
+    out["_nan"] = {"n": n_nan, "pct": 100.0 * n_nan / store.n}
+    return out

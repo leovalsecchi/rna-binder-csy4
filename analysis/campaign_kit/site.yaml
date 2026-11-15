@@ -1,0 +1,4 @@
+# site.yaml — Leo's real paths (GITIGNORED; not committed). Others copy site.yaml.example.
+user: lvalsecchi
+rb_root: /cluster/work/wicky/lvalsecchi/rna_binder
+shared: /cluster/work/wicky

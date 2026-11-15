@@ -1,0 +1,63 @@
+{
+  "policy": {
+    "user": "lvalsecchi",
+    "cycle_minutes": 10,
+    "max_moves_per_cycle": 40,
+    "per_target_ramp": 20,
+    "move_cooldown_min": 30,
+    "min_improvement_h": 0.5,
+    "runtime_window_h": 24,
+    "kill_switch": "/cluster/work/wicky/lvalsecchi/rna_binder/ops/watchers/gpu_watcher/watcher_enabled",
+    "lock_file":   "/cluster/work/wicky/lvalsecchi/rna_binder/ops/watchers/gpu_watcher/watcher.lock",
+    "state_file":  "/cluster/work/wicky/lvalsecchi/rna_binder/ops/watchers/gpu_watcher/state.json",
+    "log_file":    "/cluster/work/wicky/lvalsecchi/rna_binder/ops/watchers/gpu_watcher/watcher.log"
+  },
+  "qos_gpu_caps": {
+    "es_wicky/gpuhe/4": 96,
+    "es_wicky/gpuhe/24": 50,
+    "es_wicky/gpuhe/120": 29,
+    "es_wicky/gpuhe/bulk": 240,
+    "es_wicky/gpu/4": 96,
+    "es_wicky/gpu/24": 50,
+    "es_wicky/gpu/120": 29,
+    "es_wicky/gpu/bulk": 240
+  },
+  "_comment": "min_buffer=5 on the secondary pools (gpupr a100, gpu eu-g3 quadro) keeps >=5 of my jobs queued there at all times so I'm always in line to capture a freed GPU (presence != idle). gpuhe targets have no buffer (they are the over-full SOURCE). Pending buffer jobs don't consume the qos run-cap. af3+esm need 24G; b2 needs 8G on the separate es_wicky/gpu/* qos.",
+  "job_classes": {
+    "refold_af3": {
+      "req_gpumem_g": 24,
+      "targets": [
+        {"partition": "gpuhe.24h",  "qos": "es_wicky/gpuhe/24",  "max_time_h": 24,  "node_prefixes": ["eu-g6-"],            "set_nodes": "eu-g6-[001-080]", "set_features": "gpuhe", "preempt": false},
+        {"partition": "gpuhe.120h", "qos": "es_wicky/gpuhe/120", "max_time_h": 120, "node_prefixes": ["eu-g6-"],            "set_nodes": "eu-g6-[001-080]", "set_features": "gpuhe", "preempt": false},
+        {"partition": "gpupr.24h",  "qos": "es_wicky/gpuhe/24",  "max_time_h": 48,  "node_prefixes": ["eu-a65-", "eu-ts-"], "set_nodes": null,              "set_features": null,    "preempt": false, "min_buffer": 5},
+        {"partition": "gpupr.120h", "qos": "es_wicky/gpuhe/120", "max_time_h": 120, "node_prefixes": ["eu-a65-", "eu-ts-"], "set_nodes": null,              "set_features": null,    "preempt": false, "min_buffer": 5},
+        {"partition": "gpuhe.bulk", "qos": "es_wicky/gpuhe/bulk","max_time_h": 120, "node_prefixes": ["eu-g6-"],            "set_nodes": "eu-g6-[001-080]", "set_features": "gpuhe", "preempt": true},
+        {"partition": "gpupr.bulk", "qos": "es_wicky/gpuhe/bulk","max_time_h": 120, "node_prefixes": ["eu-a65-", "eu-ts-"], "set_nodes": null,              "set_features": null,    "preempt": true,  "min_buffer": 5}
+      ]
+    },
+    "refold_esm": {
+      "req_gpumem_g": 24,
+      "targets": [
+        {"partition": "gpuhe.24h",  "qos": "es_wicky/gpuhe/24",  "max_time_h": 24,  "node_prefixes": ["eu-g6-"],            "set_nodes": "eu-g6-[001-080]", "set_features": "gpuhe", "preempt": false},
+        {"partition": "gpuhe.120h", "qos": "es_wicky/gpuhe/120", "max_time_h": 120, "node_prefixes": ["eu-g6-"],            "set_nodes": "eu-g6-[001-080]", "set_features": "gpuhe", "preempt": false},
+        {"partition": "gpupr.24h",  "qos": "es_wicky/gpuhe/24",  "max_time_h": 48,  "node_prefixes": ["eu-a65-", "eu-ts-"], "set_nodes": null,              "set_features": null,    "preempt": false, "min_buffer": 5},
+        {"partition": "gpupr.120h", "qos": "es_wicky/gpuhe/120", "max_time_h": 120, "node_prefixes": ["eu-a65-", "eu-ts-"], "set_nodes": null,              "set_features": null,    "preempt": false, "min_buffer": 5},
+        {"partition": "gpu.4h",     "qos": "es_wicky/gpu/4",     "max_time_h": 4,   "node_prefixes": ["eu-g3-"],            "set_nodes": null,              "set_features": null,    "preempt": false, "min_buffer": 5},
+        {"partition": "gpu.24h",    "qos": "es_wicky/gpu/24",    "max_time_h": 48,  "node_prefixes": ["eu-g3-"],            "set_nodes": null,              "set_features": null,    "preempt": false, "min_buffer": 5},
+        {"partition": "gpu.120h",   "qos": "es_wicky/gpu/120",   "max_time_h": 120, "node_prefixes": ["eu-g3-"],            "set_nodes": null,              "set_features": null,    "preempt": false, "min_buffer": 5},
+        {"partition": "gpuhe.bulk", "qos": "es_wicky/gpuhe/bulk","max_time_h": 120, "node_prefixes": ["eu-g6-"],            "set_nodes": "eu-g6-[001-080]", "set_features": "gpuhe", "preempt": true},
+        {"partition": "gpupr.bulk", "qos": "es_wicky/gpuhe/bulk","max_time_h": 120, "node_prefixes": ["eu-a65-", "eu-ts-"], "set_nodes": null,              "set_features": null,    "preempt": true,  "min_buffer": 5},
+        {"partition": "gpu.bulk",   "qos": "es_wicky/gpu/bulk",  "max_time_h": 120, "node_prefixes": ["eu-g3-"],            "set_nodes": null,              "set_features": null,    "preempt": true,  "min_buffer": 5}
+      ]
+    },
+    "refold_b2": {
+      "req_gpumem_g": 8,
+      "targets": [
+        {"partition": "gpu.4h",   "qos": "es_wicky/gpu/4",   "max_time_h": 4,   "node_prefixes": ["eu-lo-g2-", "eu-lo-g3-", "eu-g3-"], "set_nodes": null, "set_features": null, "preempt": false, "min_buffer": 5},
+        {"partition": "gpu.24h",  "qos": "es_wicky/gpu/24",  "max_time_h": 48,  "node_prefixes": ["eu-lo-g2-", "eu-lo-g3-", "eu-g3-"], "set_nodes": null, "set_features": null, "preempt": false, "min_buffer": 5},
+        {"partition": "gpu.120h", "qos": "es_wicky/gpu/120", "max_time_h": 120, "node_prefixes": ["eu-lo-g2-", "eu-lo-g3-", "eu-g3-"], "set_nodes": null, "set_features": null, "preempt": false, "min_buffer": 5},
+        {"partition": "gpu.bulk", "qos": "es_wicky/gpu/bulk", "max_time_h": 120, "node_prefixes": ["eu-lo-g2-", "eu-lo-g3-", "eu-g3-"], "set_nodes": null, "set_features": null, "preempt": true, "min_buffer": 5}
+      ]
+    }
+  }
+}

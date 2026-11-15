@@ -1,0 +1,160 @@
+# Review package: 1e953c7..HEAD
+
+## Commits
+f66dc99 Add composition-based chain selection with inverted-RFD3 regression test
+
+## Files changed
+ src/binder_map/chains.py | 74 ++++++++++++++++++++++++++++++++++++++++++++++++
+ tests/test_chains.py     | 63 +++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 137 insertions(+)
+
+## Diff
+diff --git a/src/binder_map/chains.py b/src/binder_map/chains.py
+new file mode 100644
+index 0000000..cac7ea4
+--- /dev/null
++++ b/src/binder_map/chains.py
+@@ -0,0 +1,74 @@
++"""Composition-based protein/RNA chain selection.
++
++Chain IDs are NOT reliable across this campaign's producers:
++
++    layer   stack                          protein chain
++    design  RFD3+LiMPNN                    B   <- inverted, 53% of the layer
++    design  BD1/BG+LiMPNN/HD+LiMPNN        A
++    design  BG+BIF                         A   (different mmCIF dialect)
++    af3     all                            A
++    esm     all                            A
++
++So the rule is the one rna_binder.analysis.structural.split_chains uses:
++RNA is the chain whose residue names subset {A, C, G, U}; protein is the other.
++"""
++from __future__ import annotations
++
++import gzip
++import io
++from pathlib import Path
++
++import biotite.structure as struc
++import biotite.structure.io.pdbx as pdbx
++
++RNA_RESNAMES = frozenset({"A", "C", "G", "U"})
++
++
++class ChainSelectError(Exception):
++    """No unambiguous protein/RNA split exists for this structure."""
++
++
++def load_structure(path: str | Path):
++    """Read a .cif or .cif.gz into an AtomArray (first model, no solvent)."""
++    path = Path(path)
++    raw = path.read_bytes()
++    if path.suffix == ".gz":
++        raw = gzip.decompress(raw)
++    block = pdbx.CIFFile.read(io.StringIO(raw.decode()))
++    atoms = pdbx.get_structure(block, model=1)
++    return atoms[~struc.filter_solvent(atoms)]
++
++
++def _chain_kinds(atoms) -> dict[str, str]:
++    """Map chain_id -> 'rna' | 'protein' by residue-name composition."""
++    kinds: dict[str, str] = {}
++    for chain_id in set(atoms.chain_id):
++        names = set(atoms.res_name[atoms.chain_id == chain_id])
++        kinds[chain_id] = "rna" if names <= RNA_RESNAMES else "protein"
++    return kinds
++
++
++def protein_chain_id(atoms) -> str:
++    """The chain ID holding the protein. Raises if not exactly one."""
++    kinds = _chain_kinds(atoms)
++    protein = sorted(c for c, k in kinds.items() if k == "protein")
++    if len(protein) != 1:
++        raise ChainSelectError(
++            f"expected exactly one protein chain, got {protein} from {kinds}"
++        )
++    return protein[0]
++
++
++def split_chains(atoms):
++    """Return (protein, rna) AtomArrays, selected by composition."""
++    kinds = _chain_kinds(atoms)
++    protein_ids = [c for c, k in kinds.items() if k == "protein"]
++    rna_ids = [c for c, k in kinds.items() if k == "rna"]
++    if len(protein_ids) != 1 or len(rna_ids) != 1:
++        raise ChainSelectError(
++            f"need exactly one protein and one RNA chain; got "
++            f"protein={sorted(protein_ids)} rna={sorted(rna_ids)}"
++        )
++    protein = atoms[atoms.chain_id == protein_ids[0]]
++    rna = atoms[atoms.chain_id == rna_ids[0]]
++    return protein, rna
+diff --git a/tests/test_chains.py b/tests/test_chains.py
+new file mode 100644
+index 0000000..ca13e7a
+--- /dev/null
++++ b/tests/test_chains.py
+@@ -0,0 +1,63 @@
++import pytest
++
++from binder_map.chains import (
++    ChainSelectError, load_structure, protein_chain_id, split_chains,
++)
++
++RNA_RESNAMES = {"A", "C", "G", "U"}
++
++
++def _split(path):
++    return split_chains(load_structure(path))
++
++
++def test_rfd3_design_protein_is_chain_B(rfd3_design):
++    """RFD3+LiMPNN design CIFs are inverted: chain A is the RNA target.
++
++    This is 53% of the design layer. If this test ever fails, something
++    upstream changed and the pipeline must stop.
++    """
++    atoms = load_structure(rfd3_design)
++    assert protein_chain_id(atoms) == "B"
++    protein, rna = split_chains(atoms)
++    assert len(set(zip(protein.chain_id, protein.res_id))) == 80
++    assert set(rna.res_name) <= RNA_RESNAMES
++
++
++def test_bd1_design_protein_is_chain_A(bd1_design):
++    atoms = load_structure(bd1_design)
++    assert protein_chain_id(atoms) == "A"
++    protein, rna = split_chains(atoms)
++    assert len(set(zip(protein.chain_id, protein.res_id))) == 80
++
++
++def test_bgbif_dialect_parses(bgbif_design):
++    """BG+BIF uses a different mmCIF dialect; a hand-rolled parser failed on it."""
++    protein, rna = _split(bgbif_design)
++    assert len(set(zip(protein.chain_id, protein.res_id))) == 80
++    assert set(rna.res_name) <= RNA_RESNAMES
++
++
++@pytest.mark.parametrize("layer", ["af3_refold", "esm_refold"])
++def test_refolds_protein_is_chain_A(layer, request):
++    atoms = load_structure(request.getfixturevalue(layer))
++    assert protein_chain_id(atoms) == "A"
++    protein, rna = split_chains(atoms)
++    assert len(set(zip(protein.chain_id, protein.res_id))) == 80
++
++
++def test_all_fixtures_give_80_residue_protein_and_rna(
++    rfd3_design, bd1_design, bgbif_design, af3_refold, esm_refold
++):
++    for path in (rfd3_design, bd1_design, bgbif_design, af3_refold, esm_refold):
++        protein, rna = _split(path)
++        assert len(set(zip(protein.chain_id, protein.res_id))) == 80, path
++        assert len(rna) > 0, path
++        assert set(rna.res_name) <= RNA_RESNAMES, path
++
++
++def test_protein_only_structure_raises(bd1_design):
++    atoms = load_structure(bd1_design)
++    protein, _ = split_chains(atoms)
++    with pytest.raises(ChainSelectError):
++        split_chains(protein)

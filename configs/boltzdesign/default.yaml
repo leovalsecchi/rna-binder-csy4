@@ -1,0 +1,76 @@
+# BoltzDesign1 config for csy4_crrna_free.
+# 1:1 reflection of campaigns/_smoketests/boltzdesign1/scripts/bd1_launcher.sh
+# + configs/csy4_smoke01.json.
+# Last verified: cache fix tested by job 235229 (2026-05-21, infrastructure OK,
+# scientific filter rejected smoketest designs as expected at small scale).
+
+target_id: csy4_crrna_free
+generator: boltzdesign
+inverse_folder: ligandmpnn        # BD1 has bundled LigandMPNN in /app/LigandMPNN
+config_name: default
+
+slurm:
+  job_name: bd1
+  partition: gpuhe.24h
+  time: "23:30:00"
+  cpus_per_task: 4
+  mem_per_cpu: "10G"
+  gpus: "rtx_4090:1"             # 24GB sufficient; pinned to avoid CC<8.x
+  tmp: "25G"
+
+container:
+  sif: /cluster/work/wicky/containers/boltz_design1.sif
+  apptainer_cmd: exec
+  nv: true
+
+  # Cache dir mirrors what bd1 expects at /cluster/home/$USER
+  boltz_cache: /cluster/work/wicky/lvalsecchi/rna_binder/_cache/boltz_design1
+  # FAKE_HOME constructed at runtime from $TMPDIR
+
+  binds:
+    - "/cluster/work/wicky"
+    - "/cluster/software"
+  # The two dynamic binds added by the launcher:
+  #   --bind ${TMPDIR}:${TMPDIR}                       (slurm-assigned)
+  #   --bind ${BOLTZ_CACHE}:/cluster/home/${USER}      (cache redirect, the fix)
+
+generator_params:
+  # These are translated to --target_name, --pdb_path, etc., for boltzdesign.py
+  target_name: csy4_rna
+  pdb_path: /cluster/work/wicky/lvalsecchi/rna_binder/targets/csy4_crrna_free/csy4_rna_only.pdb
+  target_type: rna
+  pdb_target_ids: B
+  design_samples: 50              # production scale; override to 2 for smoketest
+  suffix: default
+  run_alphafold: "False"
+  run_rosetta: "False"
+  length_min: 80
+  length_max: 80
+  inter_chain_cutoff: 10
+  boltz_checkpoint: /cluster/work/wicky/params/boltz/boltz1_conf.ckpt
+  ccd_path: /cluster/work/wicky/params/boltz/ccd.pkl
+
+# Notes:
+# - bd1 launcher copies /app/LigandMPNN into the run dir at startup (required
+#   so MPNN can write its own working files).
+# - Modules loaded inside the sbatch: `module load eth_proxy`.
+# - Cache binds: BOLTZ_CACHE must contain .boltz/ with symlinks to
+#   {boltz1_conf.ckpt, ccd.pkl}. The launcher creates these idempotently.
+# - At smoketest scale (design_samples=2), the confidence-threshold filter
+#   typically rejects all designs ("Error: No designs passed thresholds").
+#   This is expected, not a bug — production runs need ≥50 designs.
+
+# To smoketest cheaply (won't pass filter, but validates infrastructure):
+#   --override generator_params.design_samples=2
+#   --override slurm.time="01:00:00"
+
+# Output structure (boltzdesign1 native):
+#   run_dir/
+#     LigandMPNN/                                # copied from /app
+#     outputs/rna_<target_name>_<suffix>/
+#       pdb/                                     # raw backbones per iteration
+#       loss/, animation/                        # training artifacts
+#       ligandmpnn_cutoff_4/                     # MPNN redesigns
+#       results_yaml/                            # design specs (for boltz refold)
+#       results_final/                           # high-confidence boltz refolds
+#       results_yaml_apo/, results_final_apo/    # apo-state refolds

@@ -1,0 +1,35 @@
+# This repository holds source only. Run output, data and container images live
+# elsewhere; see provenance/data_availability.md.
+__pycache__/
+*.pyc
+.DS_Store
+._*
+
+# Run output that sits interleaved with the scripts in the production tree.
+*.log
+*.slurmout
+*.err
+*.out
+logs/
+
+# Data. Nothing tabular belongs here.
+*.csv
+*.csv.gz
+*.tsv.gz
+*.parquet
+*.npy
+*.npz
+
+# Structures and container images.
+*.cif
+*.cif.gz
+*.pdb
+*.sif
+*.tar
+*.tar.zst
+*.ckpt
+*.pt
+*.bin
+
+# provenance/versions.tsv is the one tracked table.
+!provenance/versions.tsv

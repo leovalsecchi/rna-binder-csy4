@@ -1,0 +1,996 @@
+#!/usr/bin/env python3
+"""campaign_status.py — pipeline-state board for an rna_binder campaign.
+
+Walks ``campaigns/<target>/<stack>/<run>/`` on the eulermount and reports, per
+run, where it sits in the pipeline:
+
+  * which stacks were generated (have any design output)
+  * which runs ran the design step + how many designs
+  * which design runs were zipped  (tar.zst vs loose .cif/.pdb)
+  * which runs were refolded        (AF3 / B2 leaves present + producing output)
+  * which refolds were compressed afterwards (leaf designs.tar.zst)
+
+Three views, all grouped by stack:
+  * default  — a pipeline FUNNEL: four bars per stack showing the fraction of
+               runs that cleared each stage (generation · compression · refold ·
+               compression), filter-style (█ cleared · ▒ partial · ░ not yet).
+  * --table  — the per-uuid check grid (✓/~/· over the same four stages).
+  * --by-run — the per-run table.
+
+With ``--csv FILE`` it also writes one row per uuid (per-run with --by-run),
+including the on-disk file paths.
+
+Reads ONLY the local eulermount — no SSH — unless ``--queue`` is given (which
+annotates rows with live SLURM state via euler.squeue). Every filesystem op is
+OSError-guarded, so a flaky sshfs mount degrades to "skip that run" instead of
+crashing the whole report. Layout reference: see inspect_runs.py and
+~/rna_binder_archiving/phase2/AS_BUILT.md.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+
+# The campaign tree lives here on Euler (local + fast) and is mirrored onto the
+# Mac via the eulermount (slower, flaky). Auto-pick whichever is present so the
+# SAME script runs in both places with no flags — on Euler it's fast.
+EULER_ROOT = "/cluster/work/wicky/lvalsecchi/rna_binder"
+try:  # stay consistent with the GUI's mount default if importable
+    from inspect_runs import EULERMOUNT_ROOT_DEFAULT as MOUNT_ROOT
+except Exception:  # run from anywhere (e.g. on Euler, where the GUI isn't)
+    MOUNT_ROOT = "/Volumes/eulermount/lvalsecchi/rna_binder"
+
+
+def default_root() -> str:
+    """Prefer the local cluster path when on Euler, else the eulermount."""
+    return EULER_ROOT if os.path.isdir(EULER_ROOT) else MOUNT_ROOT
+
+
+DEFAULT_TARGET = "csy4_crrna_free"
+
+# Design *structure* files (everything else in a .tar.zst .list — json sidecars,
+# etc. — is not a design). Matches inspect_runs._count_designs.
+DESIGN_EXTS = {"pdb", "cif", "gz"}
+
+# Refold leaf dirs are named "<msa>[_<uuid8>]"; anything else under refold_*/
+# (e.g. the stray "run" submit dir) is not a refold leaf.
+LEAF_PREFIXES = ("msaoff", "msaon")
+
+_UUID_RE = re.compile(r"([0-9a-f]{8})")
+# "<label>_<uuid8>" — a multi-run per-run satellite dir (skipped when "<label>" exists)
+_SAT_RE = re.compile(r"^(.+)_[0-9a-f]{8}$")
+
+
+# ── small fs helpers (all OSError-tolerant) ──────────────────────────────────
+def _hidden(name: str) -> bool:
+    # also drops macOS AppleDouble "._foo" sidecars that litter the sshfs mount
+    return name.startswith(".")
+
+
+def _iterdir(p: Path) -> list[Path]:
+    try:
+        return [c for c in p.iterdir() if not _hidden(c.name)]
+    except OSError:
+        return []
+
+
+def _scan_names(p: Path) -> list[str]:
+    """Non-hidden entry names via one readdir, NO per-entry stat.
+
+    Euler's GPFS is very slow at stat(); counting design files by name (not
+    is_file) keeps the scan to one syscall per dir instead of thousands.
+    """
+    try:
+        with os.scandir(p) as it:
+            return [e.name for e in it if not e.name.startswith(".")]
+    except OSError:
+        return []
+
+
+def _design_ext(name: str) -> bool:
+    return name.rsplit(".", 1)[-1].lower() in DESIGN_EXTS and not name.endswith(
+        (".tar.zst", ".list", ".lock"))
+
+
+def _is_dir(p: Path) -> bool:
+    try:
+        return p.is_dir()
+    except OSError:
+        return False
+
+
+def _exists(p: Path) -> bool:
+    try:
+        return p.exists()
+    except OSError:
+        return False
+
+
+def _list_count(list_path: Path) -> int:
+    """Count design structures in a *.tar.zst.list sidecar (by extension).
+
+    errors="ignore": some .list files carry non-UTF-8 bytes in member names
+    (e.g. an odd char in a filename) which would otherwise raise UnicodeDecodeError.
+    """
+    try:
+        text = list_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return 0
+    return sum(1 for ln in text.splitlines()
+               if ln.rsplit(".", 1)[-1].lower() in DESIGN_EXTS)
+
+
+def _count_loose_designs(designs_dir: Path) -> int:
+    return sum(1 for n in _scan_names(designs_dir) if _design_ext(n))
+
+
+# ── design status ────────────────────────────────────────────────────────────
+@dataclass
+class DesignStatus:
+    n: int = 0                      # total design structures
+    whole: bool = False             # <run>/designs.tar.zst
+    n_slices: int = 0               # <run>/designs/<uuid>.tar.zst
+    loose: bool = False             # loose .cif/.pdb in <run>/designs/
+    designs_dir: Path | None = None
+    whole_archive: Path | None = None
+    slice_archives: list[Path] = field(default_factory=list)
+
+    @property
+    def packed(self) -> bool:
+        return self.whole or self.n_slices > 0
+
+    @property
+    def state(self) -> str:
+        if self.packed and self.loose:
+            return "mixed"
+        if self.packed:
+            return "packed"
+        if self.loose:
+            return "loose"
+        return "none"
+
+
+def _design_status(run_dir: Path) -> DesignStatus:
+    ds = DesignStatus()
+    whole = run_dir / "designs.tar.zst"
+    if _exists(whole):
+        ds.whole = True
+        ds.whole_archive = whole
+        ds.n += _list_count(run_dir / "designs.tar.zst.list")
+
+    designs_dir = run_dir / "designs"
+    names = _scan_names(designs_dir)          # one readdir, no per-file stat
+    if names:
+        ds.designs_dir = designs_dir
+        n_loose = 0
+        for n in names:
+            if n.endswith(".tar.zst"):
+                ds.n_slices += 1
+                ds.slice_archives.append(designs_dir / n)
+                ds.n += _list_count(designs_dir / (n + ".list"))
+            elif _design_ext(n):
+                n_loose += 1
+        if n_loose:
+            ds.loose = True
+            ds.n += n_loose
+    return ds
+
+
+# ── refold status ─────────────────────────────────────────────────────────────
+@dataclass
+class LeafStatus:
+    name: str
+    state: str          # packed | loose | legacy | pending
+    n: int
+    path: Path
+
+
+@dataclass
+class RefoldStatus:
+    kind: str                          # "af3" | "b2"
+    present: bool = False
+    path: Path | None = None
+    leaves: list[LeafStatus] = field(default_factory=list)
+
+    @property
+    def total(self) -> int:
+        return len(self.leaves)
+
+    @property
+    def packed(self) -> int:
+        return sum(1 for l in self.leaves if l.state == "packed")
+
+    @property
+    def loose(self) -> int:
+        return sum(1 for l in self.leaves if l.state == "loose")
+
+    @property
+    def legacy(self) -> int:
+        return sum(1 for l in self.leaves if l.state == "legacy")
+
+    @property
+    def pending(self) -> int:
+        return sum(1 for l in self.leaves if l.state == "pending")
+
+    @property
+    def done(self) -> int:
+        return self.packed + self.loose + self.legacy
+
+    @property
+    def n_designs(self) -> int:
+        return sum(l.n for l in self.leaves)
+
+
+def _leaf_status(leaf: Path, deep: bool) -> LeafStatus:
+    name = leaf.name
+    # one readdir of the leaf tells us packed/loose/legacy/pending without stat()
+    top = set(_scan_names(leaf))
+    if "designs.tar.zst" in top:
+        return LeafStatus(name, "packed", _list_count(leaf / "designs.tar.zst.list"), leaf)
+    n_loose = _count_loose_designs(leaf / "designs") if "designs" in top else 0
+    if n_loose:
+        return LeafStatus(name, "loose", n_loose, leaf)
+    if "outputs" in top:                    # old nested AF3 layout (pre-canonicalize)
+        n = 0
+        if deep:
+            try:
+                n = sum(1 for _ in (leaf / "outputs").rglob("*_model.cif"))
+            except OSError:
+                n = 0
+        return LeafStatus(name, "legacy", n, leaf)
+    return LeafStatus(name, "pending", 0, leaf)
+
+
+def _refold_status(run_dir: Path, kind: str, deep: bool) -> RefoldStatus:
+    rdir = run_dir / f"refold_{kind}"
+    leaves = _scan_names(rdir)
+    rs = RefoldStatus(kind=kind)
+    if not leaves and not _is_dir(rdir):
+        return rs
+    rs.present = True
+    rs.path = rdir
+    for name in sorted(leaves):
+        if name.startswith(LEAF_PREFIXES):
+            rs.leaves.append(_leaf_status(rdir / name, deep))
+    return rs
+
+
+# ── run-level aggregation ──────────────────────────────────────────────────────
+@dataclass
+class RunStatus:
+    stack: str
+    run: str
+    path: Path
+    designs: DesignStatus
+    af3: RefoldStatus
+    b2: RefoldStatus
+    esm: RefoldStatus
+    n_subruns: int = 0
+    uuids: list[str] = field(default_factory=list)
+    generator: str = ""
+    label: str = ""
+    submitted: str = ""
+    sort_epoch: float = 0.0
+    active_jobs: list[str] = field(default_factory=list)  # filled by --queue
+
+
+def _read_meta_runs(run_dir: Path) -> tuple[int, list[str], str, str, str, float]:
+    """Scan run_meta*.json -> (n_subruns, uuids, generator, label, submitted, epoch)."""
+    metas = [p for p in _iterdir(run_dir)
+             if p.name.startswith("run_meta") and p.name.endswith(".json")]
+    uuids: list[str] = []
+    generator = label = ""
+    newest_epoch = 0.0
+    newest_iso = ""
+    for p in sorted(metas):
+        try:
+            m = json.loads(p.read_text())
+        except (ValueError, OSError):
+            continue
+        u = m.get("uuid8") or ""
+        if u and u not in uuids:
+            uuids.append(u)
+        generator = generator or m.get("generator", "")
+        label = label or m.get("label", "")
+        iso = m.get("submitted", "")
+        if iso:
+            try:
+                ep = datetime.fromisoformat(iso).timestamp()
+                if ep > newest_epoch:
+                    newest_epoch, newest_iso = ep, iso
+            except ValueError:
+                pass
+    n_subruns = len(metas)
+    # fall back to the dir's own uuid8 suffix when there are no meta files
+    if not uuids:
+        m = _UUID_RE.search(run_dir.name)
+        if m:
+            uuids = [m.group(1)]
+    if newest_epoch == 0.0:
+        try:
+            newest_epoch = run_dir.stat().st_mtime
+        except OSError:
+            newest_epoch = 0.0
+    submitted = (datetime.fromtimestamp(newest_epoch).strftime("%Y-%m-%d %H:%M")
+                 if newest_epoch else "")
+    if newest_iso:
+        try:
+            submitted = datetime.fromisoformat(newest_iso).strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            pass
+    return n_subruns, uuids, generator, label, submitted, newest_epoch
+
+
+def scan_campaign(root: Path, target: str, deep: bool = False,
+                  stack_pats: list[str] | None = None,
+                  run_pats: list[str] | None = None) -> list[RunStatus]:
+    """Walk campaigns/<target>/<stack>/<run>/. Filters prune the walk (cheap name
+    checks) so `--run`/`--stack` only stat the matching dirs — key on slow GPFS."""
+    base = root / "campaigns" / target
+    runs: list[RunStatus] = []
+    for stack_dir in sorted(_iterdir(base)):
+        # _archive / _backbones are not generation stacks; README.md etc. not dirs
+        if stack_dir.name.startswith("_"):
+            continue
+        if stack_pats and not any(p in stack_dir.name.lower() for p in stack_pats):
+            continue
+        if not _is_dir(stack_dir):
+            continue
+        # Names of all entries in this stack, to detect multi-run satellites.
+        sibling_names = {c.name for c in _iterdir(stack_dir)}
+        for run_dir in sorted(_iterdir(stack_dir)):
+            if run_pats and not any(p in run_dir.name.lower() for p in run_pats):
+                continue
+            # Skip a multi-run per-run satellite dir "<label>_<uuid8>" when the
+            # shared "<label>" run dir exists as a sibling: its designs live in the
+            # shared dir, so listing it would duplicate every uuid as an empty row.
+            # (Single-run dirs like "midrun_v2_f2653389" have NO sibling "midrun_v2"
+            # and are kept.)
+            m = _SAT_RE.match(run_dir.name)
+            if m and m.group(1) in sibling_names:
+                continue
+            if not _is_dir(run_dir):
+                continue
+            n_sub, uuids, gen, label, submitted, epoch = _read_meta_runs(run_dir)
+            runs.append(RunStatus(
+                stack=stack_dir.name,
+                run=run_dir.name,
+                path=run_dir,
+                designs=_design_status(run_dir),
+                af3=_refold_status(run_dir, "af3", deep),
+                b2=_refold_status(run_dir, "b2", deep),
+                esm=_refold_status(run_dir, "esm", deep),
+                n_subruns=n_sub,
+                uuids=uuids,
+                generator=gen,
+                label=label,
+                submitted=submitted,
+                sort_epoch=epoch,
+            ))
+    return runs
+
+
+def _squeue_local(user: str = "lvalsecchi") -> list[tuple[str, str, str]]:
+    """(name, state, jobid) from a local `squeue` — used when on Euler."""
+    out = subprocess.run(["squeue", "-u", user, "-h", "-o", "%i|%j|%T"],
+                         capture_output=True, text=True, timeout=30)
+    jobs = []
+    for line in out.stdout.splitlines():
+        p = line.split("|", 2)
+        if len(p) == 3:
+            jobs.append((p[1].strip(), p[2].strip(), p[0].strip()))
+    return jobs
+
+
+def annotate_queue(runs: list[RunStatus]) -> str | None:
+    """Mark runs whose uuid8 matches a live SLURM job. Returns an error note or None.
+
+    Uses a local `squeue` when available (on Euler), else falls back to the GUI's
+    euler.py SSH wrapper (from the Mac). Non-fatal: returns a note on failure.
+    """
+    jobs: list[tuple[str, str, str]] | None = None
+    err: str | None = None
+    if shutil.which("squeue"):                      # running on a SLURM host
+        try:
+            jobs = _squeue_local()
+        except Exception as e:
+            err = f"(squeue failed: {e})"
+    if jobs is None:
+        try:
+            import euler  # local GUI module; uses `ssh euler`
+            jobs = [(j.name, j.state, j.jobid) for j in euler.squeue()]
+        except Exception as e:
+            return err or f"(queue unavailable: {e})"
+    for r in runs:
+        for name, state, jid in jobs:
+            if any(u and u in name for u in r.uuids):
+                r.active_jobs.append(f"{state}:{jid}")
+    return None
+
+
+# ── per-uuid view ──────────────────────────────────────────────────────────────
+# A "run dir" can hold many uuids (multi-run shares one dir; refolds land as
+# per-uuid leaves msaoff_<uuid>). The user wants one row per uuid with four
+# checks: design done, design zipped, refolded, refold zipped.
+_HEX8 = re.compile(r"[0-9a-f]{8}")
+
+
+def _uuid_in(name: str) -> str | None:
+    m = _HEX8.search(name)
+    return m.group(0) if m else None
+
+
+@dataclass
+class UuidRow:
+    stack: str
+    uuid: str
+    label: str
+    design: str                       # 'none' | 'loose' | 'zip' | 'mixed'
+    af3: tuple = (0, 0, 0)            # (total, done, packed) leaves
+    b2: tuple = (0, 0, 0)
+    esm: tuple = (0, 0, 0)
+    run_path: Path | None = None
+
+    @property
+    def rf_total(self) -> int:
+        return self.af3[0] + self.b2[0] + self.esm[0]
+
+    @property
+    def rf_done(self) -> int:
+        return self.af3[1] + self.b2[1] + self.esm[1]
+
+    @property
+    def rf_packed(self) -> int:
+        return self.af3[2] + self.b2[2] + self.esm[2]
+
+    @property
+    def design_done(self) -> str:
+        return "none" if self.design == "none" else "full"
+
+    @property
+    def design_zip(self) -> str:
+        return {"zip": "full", "mixed": "partial"}.get(self.design, "none")
+
+    @property
+    def refold_state(self) -> str:
+        if self.rf_total == 0:
+            return "none"
+        return "full" if self.rf_done >= self.rf_total else (
+            "partial" if self.rf_done > 0 else "none")
+
+    @property
+    def rzip_state(self) -> str:
+        if self.rf_total == 0:
+            return "none"
+        return "full" if self.rf_packed >= self.rf_total else (
+            "partial" if self.rf_packed > 0 else "none")
+
+    @property
+    def is_empty(self) -> bool:
+        return self.design == "none" and self.rf_total == 0
+
+
+def explode_uuids(run: RunStatus) -> list[UuidRow]:
+    """Break one run dir into per-uuid rows (design + refold state per uuid)."""
+    d = run.designs
+    single = run.uuids[0] if len(run.uuids) == 1 else _uuid_in(run.run)
+
+    design: dict[str, str] = {}
+    for arc in d.slice_archives:                      # per-uuid slice = zipped
+        u = _uuid_in(arc.name)
+        if u:
+            design[u] = "zip"
+    if d.whole:                                       # whole-dir archive = zipped
+        for u in (run.uuids or ([single] if single else [])):
+            design[u] = "zip"
+    if d.loose:                                       # loose files = not zipped
+        for u in (run.uuids or ([single] if single else [])):
+            design[u] = "mixed" if design.get(u) == "zip" else "loose"
+
+    rf: dict[str, dict[str, list[int]]] = {}
+    for key, rs in (("af3", run.af3), ("b2", run.b2), ("esm", run.esm)):
+        for lf in rs.leaves:
+            u = _uuid_in(lf.name) or single
+            if not u:
+                continue
+            rec = rf.setdefault(u, {"af3": [0, 0, 0], "b2": [0, 0, 0], "esm": [0, 0, 0]})[key]
+            rec[0] += 1
+            if lf.state in ("packed", "loose", "legacy"):
+                rec[1] += 1
+            if lf.state == "packed":
+                rec[2] += 1
+
+    rows = []
+    for u in sorted(set(design) | set(rf) | set(run.uuids)):
+        leaves = rf.get(u, {"af3": [0, 0, 0], "b2": [0, 0, 0], "esm": [0, 0, 0]})
+        rows.append(UuidRow(run.stack, u, run.label or run.run,
+                            design.get(u, "none"),
+                            tuple(leaves["af3"]), tuple(leaves["b2"]),
+                            tuple(leaves["esm"]), run.path))
+    return rows
+
+
+# ── terminal rendering ─────────────────────────────────────────────────────────
+class C:
+    def __init__(self, enabled: bool):
+        self.on = enabled
+    def _w(self, s, code):
+        return f"\033[{code}m{s}\033[0m" if self.on else s
+    def green(self, s):  return self._w(s, "32")
+    def yellow(self, s): return self._w(s, "33")
+    def red(self, s):    return self._w(s, "31")
+    def dim(self, s):    return self._w(s, "2")
+    def bold(self, s):   return self._w(s, "1")
+    def cyan(self, s):   return self._w(s, "36")
+
+
+def _color(c: C, txt: str, name: str) -> str:
+    return {"green": c.green, "yellow": c.yellow, "red": c.red,
+            "dim": c.dim}.get(name, lambda s: s)(txt)
+
+
+def _designs_cell(ds: DesignStatus) -> tuple[str, str]:
+    if ds.state == "none":
+        return "—", "dim"
+    if ds.state == "packed":
+        s = f"{ds.n} zip" + (f"/{ds.n_slices}sl" if ds.n_slices else "")
+        return s, "green"
+    if ds.state == "mixed":
+        return f"{ds.n} mixed", "yellow"
+    return f"{ds.n} loose", "yellow"      # loose
+
+
+def _refold_cell(rs: RefoldStatus) -> tuple[str, str]:
+    if not rs.present:
+        return "—", "dim"
+    if rs.total == 0:
+        return "(no leaves)", "dim"
+    txt = f"{rs.done}/{rs.total} ok  {rs.packed} zip"
+    if rs.pending:
+        txt += f"  {rs.pending} wait"
+    if rs.legacy:
+        txt += "  (L)"
+    if rs.done == rs.total and rs.packed == rs.total:
+        col = "green"
+    elif rs.done > 0:
+        col = "yellow"
+    else:
+        col = "red"
+    return txt, col
+
+
+def _trunc(s: str, w: int) -> str:
+    return s if len(s) <= w else s[: w - 1] + "…"
+
+
+# ── per-uuid check grid (default view) ───────────────────────────────────────────
+_GRID_COLS = [("design", 8), ("zip", 6), ("refold", 8), ("zip", 6)]
+
+
+def _glyph(state: str) -> str:
+    return {"full": "✓", "partial": "~"}.get(state, "·")
+
+
+def _cell(c: C, state: str, width: int) -> str:
+    g = _glyph(state)
+    g = c.green(g) if state == "full" else c.yellow(g) if state == "partial" \
+        else c.dim(g)
+    pad = width - 1
+    return " " * (pad // 2) + g + " " * (pad - pad // 2)
+
+
+def render_uuid_grid(rows: list[UuidRow], c: C, *, detail: bool) -> None:
+    by_stack: dict[str, list[UuidRow]] = {}
+    for r in rows:
+        by_stack.setdefault(r.stack, []).append(r)
+
+    label_w = min(max([len(r.label) for r in rows] + [5]), 22)
+    head = (f"  {'uuid':<8}  {'label':<{label_w}}  "
+            + "".join(f"{n:^{w}}" for n, w in _GRID_COLS))
+    print()
+    print(c.bold(head))
+    print(c.dim("  " + "─" * (8 + label_w + sum(w for _, w in _GRID_COLS) + 4)))
+
+    for stack in sorted(by_stack):
+        srows = sorted(by_stack[stack], key=lambda r: (r.label, r.uuid))
+        print()
+        print(c.cyan(c.bold(f"  {stack}")) + c.dim(f"   ({len(srows)} uuids)"))
+        for r in srows:
+            states = [r.design_done, r.design_zip, r.refold_state, r.rzip_state]
+            cells = "".join(_cell(c, s, w) for s, (_, w) in zip(states, _GRID_COLS))
+            print(f"  {r.uuid:<8}  {_trunc(r.label, label_w):<{label_w}}  {cells}")
+            if detail:
+                print(c.dim(f"  {'':<8}  {'':<{label_w}}  "
+                            f"af3 {r.af3[1]}/{r.af3[0]} ({r.af3[2]} zip)   "
+                            f"b2 {r.b2[1]}/{r.b2[0]} ({r.b2[2]} zip)   "
+                            f"esm {r.esm[1]}/{r.esm[0]} ({r.esm[2]} zip)"))
+
+    _print_uuid_summary(rows, c)
+
+
+def _print_uuid_summary(rows: list[UuidRow], c: C) -> None:
+    n = len(rows)
+    d_done = sum(1 for r in rows if r.design != "none")
+    d_zip = sum(1 for r in rows if r.design == "zip")
+    rf_started = sum(1 for r in rows if r.rf_total > 0)
+    rf_done = sum(1 for r in rows if r.refold_state == "full")
+    rz_done = sum(1 for r in rows if r.rzip_state == "full")
+    fully = sum(1 for r in rows if r.design == "zip"
+                and r.refold_state == "full" and r.rzip_state == "full")
+    print()
+    print(c.bold("  Summary") + c.dim(f"   ({n} uuids)"))
+    print(c.dim("  " + "─" * 52))
+    print(f"  design   done {d_done:>4}/{n}   zipped {d_zip:>4}/{n}")
+    print(f"  refold   done {rf_done:>4}/{n}   zipped {rz_done:>4}/{n}"
+          f"   (started {rf_started})")
+    print(c.green(f"  fully done + zipped   {fully}/{n}"))
+    print()
+    print(c.dim("  cols: design=generated · zip=designs compressed · "
+                "refold=AF3+B2 done · zip=refolds compressed"))
+    print(c.dim("  keys: ✓ done   ~ partial   · not yet"))
+    print()
+
+
+# ── pipeline funnel (default view) ───────────────────────────────────────────
+# Four stages per stack, "filter style": the fraction of runs that have cleared
+# each pipeline stage. generation -> compression(designs) -> refold ->
+# compression(refolds), i.e. the same four checks as the per-run grid, but
+# aggregated into a bar per stage so you see at a glance where runs pile up.
+_FUNNEL_STAGES = [
+    ("generation",  "design_done"),   # has design output
+    ("compression", "design_zip"),    # designs packed to .tar.zst
+    ("refold",      "refold_state"),  # AF3 + B2 leaves done
+    ("compression", "rzip_state"),    # refold leaves packed
+]
+
+
+def _bar(c: C, n_full: int, n_partial: int, n_total: int, width: int = 26) -> str:
+    """Filter-style bar: █ cleared, ▒ partial, ░ not yet (works w/o colour too)."""
+    if n_total <= 0:
+        return c.dim("░" * width)
+    f = round(width * n_full / n_total)
+    p = round(width * n_partial / n_total)
+    f = min(f, width)
+    p = min(p, width - f)
+    if n_full and f == 0:           # never hide a non-zero stage as an empty bar
+        f = 1
+        p = min(p, width - f)
+    return c.green("█" * f) + c.yellow("▒" * p) + c.dim("░" * (width - f - p))
+
+
+def _funnel_bars(rows: list[UuidRow], c: C, indent: str = "    ",
+                 width: int = 26) -> None:
+    n = len(rows)
+    for label, attr in _FUNNEL_STAGES:
+        states = [getattr(r, attr) for r in rows]
+        nf = sum(1 for s in states if s == "full")
+        npart = sum(1 for s in states if s == "partial")
+        pct = (100.0 * nf / n) if n else 0.0
+        extra = c.yellow(f"  +{npart}~") if npart else ""
+        print(f"{indent}{label:<12} {_bar(c, nf, npart, n, width)} "
+              f"{pct:5.1f}%  {nf:>4}/{n}{extra}")
+
+
+def render_funnel(rows: list[UuidRow], c: C, *, detail: bool = False) -> None:
+    """Default view: four stage bars per stack — what fraction cleared each."""
+    by_stack: dict[str, list[UuidRow]] = {}
+    for r in rows:
+        by_stack.setdefault(r.stack, []).append(r)
+
+    print()
+    print(c.bold("  Pipeline funnel")
+          + c.dim("   — fraction of runs clearing each stage"))
+    for stack in sorted(by_stack):
+        srows = by_stack[stack]
+        print()
+        print(c.cyan(c.bold(f"  {stack}")) + c.dim(f"   ({len(srows)} runs)"))
+        _funnel_bars(srows, c)
+
+    if len(by_stack) > 1:
+        print()
+        print(c.bold("  ══ all stacks ══") + c.dim(f"   ({len(rows)} runs)"))
+        _funnel_bars(rows, c)
+
+    print()
+    print(c.dim("  bar: █ cleared  ▒ partial  ░ not yet   ·   stages: "
+                "generation → compression(designs) → refold → compression(refolds)"))
+    print(c.dim("  views: default=funnel · --table=per-run checks · "
+                "--by-run=run-dir table · --csv FILE=per-run data"))
+    print()
+
+
+def render_terminal(runs: list[RunStatus], c: C, *, show_paths: bool,
+                    detail: bool, queue: bool) -> None:
+    by_stack: dict[str, list[RunStatus]] = {}
+    for r in runs:
+        by_stack.setdefault(r.stack, []).append(r)
+
+    run_w = min(max([len(r.run) for r in runs] + [12]), 30)
+    print()
+    print(c.bold(f"  {'RUN':<{run_w}}  {'DESIGNS':<13} {'AF3 refold':<22} "
+                 f"{'B2 refold':<22} {'ESM refold':<22} {'WHEN':<16}"))
+    print(c.dim("  " + "─" * (run_w + 13 + 22 + 22 + 22 + 16 + 5)))
+
+    for stack in sorted(by_stack):
+        sruns = sorted(by_stack[stack], key=lambda r: -r.sort_epoch)
+        n_with = sum(1 for r in sruns if r.designs.n > 0)
+        print()
+        print(c.cyan(c.bold(f"  {stack}")) +
+              c.dim(f"   ({len(sruns)} runs · {n_with} with designs)"))
+        for r in sruns:
+            d_txt, d_col = _designs_cell(r.designs)
+            a_txt, a_col = _refold_cell(r.af3)
+            b_txt, b_col = _refold_cell(r.b2)
+            e_txt, e_col = _refold_cell(r.esm)
+            run_lbl = _trunc(r.run, run_w)
+            live = c.yellow(" ⏳" + ",".join(r.active_jobs)) if r.active_jobs else ""
+            print(f"  {run_lbl:<{run_w}}  "
+                  f"{_color(c, f'{d_txt:<13}', d_col)} "
+                  f"{_color(c, f'{a_txt:<22}', a_col)} "
+                  f"{_color(c, f'{b_txt:<22}', b_col)} "
+                  f"{_color(c, f'{e_txt:<22}', e_col)} "
+                  f"{c.dim(f'{r.submitted:<16}')}{live}")
+            meta = []
+            if r.n_subruns > 1:
+                meta.append(f"{r.n_subruns} sub-runs")
+            if r.generator:
+                meta.append(r.generator)
+            if r.uuids:
+                meta.append(",".join(r.uuids[:6]) + ("…" if len(r.uuids) > 6 else ""))
+            if show_paths:
+                print(c.dim(f"      └ {r.path}"
+                            + (f"   · {' · '.join(meta)}" if meta else "")))
+            if detail:
+                for rs in (r.af3, r.b2, r.esm):
+                    for lf in rs.leaves:
+                        print(c.dim(f"          {rs.kind}/{lf.name:<20} "
+                                    f"{lf.state:<8} n={lf.n}"))
+
+    _print_summary(runs, c)
+
+
+def _print_summary(runs: list[RunStatus], c: C) -> None:
+    stacks = {r.stack for r in runs}
+    gen = [r for r in runs if r.designs.n > 0]
+    total_designs = sum(r.designs.n for r in runs)
+    packed_designs = sum(1 for r in gen if r.designs.state == "packed")
+    loose_designs = sum(1 for r in gen if r.designs.state in ("loose", "mixed"))
+    af3_leaves = sum(r.af3.total for r in runs)
+    af3_packed = sum(r.af3.packed for r in runs)
+    af3_done = sum(r.af3.done for r in runs)
+    b2_leaves = sum(r.b2.total for r in runs)
+    b2_packed = sum(r.b2.packed for r in runs)
+    b2_done = sum(r.b2.done for r in runs)
+    esm_leaves = sum(r.esm.total for r in runs)
+    esm_packed = sum(r.esm.packed for r in runs)
+    esm_done = sum(r.esm.done for r in runs)
+    print()
+    print(c.bold("  Summary"))
+    print(c.dim("  " + "─" * 50))
+    print(f"  stacks               {len(stacks)}")
+    print(f"  runs                 {len(runs)}  ({len(gen)} with designs)")
+    print(f"  designs (structures) {total_designs}")
+    print(f"  design dirs zipped   {packed_designs} packed · {loose_designs} loose/mixed")
+    print(f"  AF3 refold leaves    {af3_done}/{af3_leaves} done · {af3_packed} zipped")
+    print(f"  B2  refold leaves    {b2_done}/{b2_leaves} done · {b2_packed} zipped")
+    print(f"  ESM refold leaves    {esm_done}/{esm_leaves} done · {esm_packed} zipped")
+    print()
+    print(c.dim("  legend: designs = N zip[/Ksl=slices] | N loose | N mixed | —"))
+    print(c.dim("          refold  = done/total ok · zipped · wait(pending) · (L)=legacy outputs/"))
+    print()
+
+
+# ── csv ─────────────────────────────────────────────────────────────────────────
+CSV_FIELDS = [
+    "stack", "run", "path", "generator", "label", "submitted",
+    "n_subruns", "uuids", "active_jobs",
+    "n_designs", "designs_state", "designs_n_slices",
+    "designs_dir", "designs_whole_archive", "designs_slice_archives",
+    "af3_present", "af3_leaves", "af3_done", "af3_packed", "af3_loose",
+    "af3_pending", "af3_legacy", "af3_n_designs", "af3_path",
+    "b2_present", "b2_leaves", "b2_done", "b2_packed", "b2_loose",
+    "b2_pending", "b2_legacy", "b2_n_designs", "b2_path",
+    "esm_present", "esm_leaves", "esm_done", "esm_packed", "esm_loose",
+    "esm_pending", "esm_legacy", "esm_n_designs", "esm_path",
+]
+
+
+def _row(r: RunStatus) -> dict:
+    d, a, b, e = r.designs, r.af3, r.b2, r.esm
+    return {
+        "stack": r.stack, "run": r.run, "path": str(r.path),
+        "generator": r.generator, "label": r.label, "submitted": r.submitted,
+        "n_subruns": r.n_subruns, "uuids": ",".join(r.uuids),
+        "active_jobs": ",".join(r.active_jobs),
+        "n_designs": d.n, "designs_state": d.state, "designs_n_slices": d.n_slices,
+        "designs_dir": str(d.designs_dir or ""),
+        "designs_whole_archive": str(d.whole_archive or ""),
+        "designs_slice_archives": ";".join(str(p) for p in d.slice_archives),
+        "af3_present": a.present, "af3_leaves": a.total, "af3_done": a.done,
+        "af3_packed": a.packed, "af3_loose": a.loose, "af3_pending": a.pending,
+        "af3_legacy": a.legacy, "af3_n_designs": a.n_designs,
+        "af3_path": str(a.path or ""),
+        "b2_present": b.present, "b2_leaves": b.total, "b2_done": b.done,
+        "b2_packed": b.packed, "b2_loose": b.loose, "b2_pending": b.pending,
+        "b2_legacy": b.legacy, "b2_n_designs": b.n_designs,
+        "b2_path": str(b.path or ""),
+        "esm_present": e.present, "esm_leaves": e.total, "esm_done": e.done,
+        "esm_packed": e.packed, "esm_loose": e.loose, "esm_pending": e.pending,
+        "esm_legacy": e.legacy, "esm_n_designs": e.n_designs,
+        "esm_path": str(e.path or ""),
+    }
+
+
+def write_csv(runs: list[RunStatus], path: Path) -> None:
+    with path.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+        w.writeheader()
+        for r in sorted(runs, key=lambda r: (r.stack, -r.sort_epoch)):
+            w.writerow(_row(r))
+
+
+UUID_CSV_FIELDS = [
+    "stack", "uuid", "label", "design_done", "design_zip",
+    "refold_done", "refold_zip",
+    "af3_done", "af3_total", "af3_zip", "b2_done", "b2_total", "b2_zip",
+    "esm_done", "esm_total", "esm_zip",
+    "run_path",
+]
+
+
+def write_uuid_csv(rows: list[UuidRow], path: Path) -> None:
+    with path.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=UUID_CSV_FIELDS)
+        w.writeheader()
+        for r in sorted(rows, key=lambda r: (r.stack, r.label, r.uuid)):
+            w.writerow({
+                "stack": r.stack, "uuid": r.uuid, "label": r.label,
+                "design_done": r.design != "none", "design_zip": r.design == "zip",
+                "refold_done": r.refold_state == "full",
+                "refold_zip": r.rzip_state == "full",
+                "af3_done": r.af3[1], "af3_total": r.af3[0], "af3_zip": r.af3[2],
+                "b2_done": r.b2[1], "b2_total": r.b2[0], "b2_zip": r.b2[2],
+                "esm_done": r.esm[1], "esm_total": r.esm[0], "esm_zip": r.esm[2],
+                "run_path": str(r.run_path or ""),
+            })
+
+
+# ── cli ───────────────────────────────────────────────────────────────────────
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description="Pipeline-state board for an rna_binder campaign "
+                    "(generation / compression / refold / compression). Default "
+                    "view is a per-stack funnel; --table for the per-run checks.",
+        epilog="examples:\n"
+               "  campaign-status                        # funnel: fraction clearing each stage\n"
+               "  campaign-status --run 6kseq_4h         # funnel for one launch, across stacks\n"
+               "  campaign-status --run 6kseq_4h --table # per-run check table (old default view)\n"
+               "  campaign-status --list                 # list campaigns\n"
+               "  campaign-status --nonempty --csv ~/s.csv\n"
+               "  campaign-status --by-run               # old per-run table",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("target", nargs="?", default=None,
+                    help=f"campaign to check (dir under campaigns/; "
+                         f"default: {DEFAULT_TARGET}). Use --list to see them.")
+    ap.add_argument("-t", "--target", dest="target_opt", default=None,
+                    help="campaign target (same as the positional arg)")
+    ap.add_argument("-r", "--root", default=None,
+                    help="root holding campaigns/ (default: auto — Euler path "
+                         "if present, else the eulermount)")
+    ap.add_argument("--list", action="store_true",
+                    help="list available campaigns under campaigns/ and exit")
+    ap.add_argument("--csv", metavar="FILE",
+                    help="also write the table as CSV here (per-uuid, or per-run "
+                         "with --by-run)")
+    ap.add_argument("--run", "--label", dest="run", action="append", default=None,
+                    help="show only runs whose name matches (substring; "
+                         "repeatable). A launch label like '3kseq' appears in "
+                         "every stack, so this shows that launch across stacks.")
+    ap.add_argument("--stack", action="append", default=None,
+                    help="restrict to stack(s) (substring match; repeatable)")
+    ap.add_argument("--nonempty", action="store_true",
+                    help="hide runs with no designs and no refold leaves "
+                         "(e.g. combined-away HD scratch dirs, empty test dirs)")
+    ap.add_argument("-l", "--detail", action="store_true",
+                    help="add the AF3/B2 leaf breakdown under each row")
+    ap.add_argument("--table", action="store_true",
+                    help="per-run check table (the previous default view): one row "
+                         "per run with design/zip/refold/zip glyphs")
+    ap.add_argument("--by-run", action="store_true",
+                    help="group by run dir instead of per-uuid (the old table)")
+    ap.add_argument("--paths", action="store_true",
+                    help="show filesystem paths (only with --by-run)")
+    ap.add_argument("--deep", action="store_true",
+                    help="count models inside legacy outputs/ leaves (slow rglob)")
+    ap.add_argument("--queue", action="store_true",
+                    help="annotate runs with live SLURM state (needs `ssh euler`)")
+    ap.add_argument("--color", action="store_true",
+                    help="force ANSI colour on (also via FORCE_COLOR=1; useful "
+                         "when piping the SSH wrapper's output)")
+    ap.add_argument("--no-color", action="store_true", help="disable ANSI colour")
+    args = ap.parse_args(argv)
+
+    root = Path(args.root or default_root()).expanduser()
+    campaigns = root / "campaigns"
+
+    force_color = (args.color
+                   or os.environ.get("FORCE_COLOR") not in (None, "", "0"))
+    color_on = False if (args.no_color or os.environ.get("NO_COLOR")) \
+        else (force_color or sys.stdout.isatty())
+    c = C(color_on)
+
+    if args.list:
+        camps = sorted(d.name for d in _iterdir(campaigns) if _is_dir(d))
+        if not camps:
+            print(f"no campaigns found under {campaigns}", file=sys.stderr)
+            return 1
+        print(c.bold(f"\n  campaigns under {campaigns}:"))
+        for name in camps:
+            print(f"    {name}")
+        print()
+        return 0
+
+    target = args.target or args.target_opt or DEFAULT_TARGET
+    base = campaigns / target
+    if not _is_dir(base):
+        avail = ", ".join(sorted(d.name for d in _iterdir(campaigns)
+                                 if _is_dir(d))) or "(none)"
+        print(f"error: campaign not found: {base}\n"
+              f"  available: {avail}\n"
+              f"  (on the Mac, is the eulermount mounted? try --root / --list)",
+              file=sys.stderr)
+        return 2
+
+    stack_pats = [s.lower() for s in args.stack] if args.stack else None
+    run_pats = [s.lower() for s in args.run] if args.run else None
+    runs = scan_campaign(root, target, deep=args.deep,
+                         stack_pats=stack_pats, run_pats=run_pats)
+    if args.nonempty:
+        runs = [r for r in runs
+                if r.designs.n > 0 or r.af3.total > 0 or r.b2.total > 0 or r.esm.total > 0]
+    if not runs:
+        print(f"no runs found under {base}", file=sys.stderr)
+        return 1
+
+    note = annotate_queue(runs) if args.queue else None
+    print(c.bold(f"\n  campaign: {target}") + c.dim(f"   ({base})"))
+    if note:
+        print(c.yellow("  " + note))
+
+    if args.by_run:
+        render_terminal(runs, c, show_paths=args.paths,
+                        detail=args.detail, queue=args.queue)
+        if args.csv:
+            out = Path(args.csv).expanduser()
+            write_csv(runs, out)
+            print(c.green(f"  ✓ wrote CSV: {out}  ({len(runs)} runs)\n"))
+        return 0
+
+    rows = [row for r in runs for row in explode_uuids(r)]
+    if args.nonempty:
+        rows = [r for r in rows if not r.is_empty]
+    if not rows:
+        print(f"no uuids found under {base}", file=sys.stderr)
+        return 1
+    if args.table:
+        render_uuid_grid(rows, c, detail=args.detail)
+    else:
+        render_funnel(rows, c, detail=args.detail)
+    if args.csv:
+        out = Path(args.csv).expanduser()
+        write_uuid_csv(rows, out)
+        print(c.green(f"  ✓ wrote CSV: {out}  ({len(rows)} uuids)\n"))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

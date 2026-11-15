@@ -1,0 +1,29 @@
+target_id: csy4_crrna_free
+config_kind: refold_b2
+config_name: default
+source_run: REQUIRED
+rna_sequence: ACUGCCGUAUAGGCAG
+slurm:
+  job_name: refold_b2
+  partition: gpuhe.24h
+  time: "12:00:00"
+  ntasks_per_node: 4
+  nodes: 1
+  mem_per_cpu: 8G
+  # GPU selection (supervisor-style): any GPU with >=24G. Boltz-2 runs on every
+  # GPU generation tested (incl. Turing), so no node-range pin — widest pool /
+  # shortest queue. See GPU_REFOLD_COMPAT.md.
+  gpus: 1
+  gres: gpumem:24g
+container:
+  sif: /cluster/work/wicky/containers/boltz2.sif
+  cache_dir: /cluster/work/wicky/params/.boltz
+refolder_params:
+  diffusion_samples: 1
+  output_format: mmcif
+  write_full_pae: true
+  use_rna_msa: false
+  rna_msa_path: /cluster/work/wicky/lvalsecchi/rna_binder/targets/csy4_crrna_free/msa/csy4_crRNA_16nt_msa.a3m
+  use_rna_template: false
+  rna_template_path: /cluster/work/wicky/lvalsecchi/rna_binder/targets/csy4_crrna_free/csy4_rna_only.cif
+  rna_template_chain: B

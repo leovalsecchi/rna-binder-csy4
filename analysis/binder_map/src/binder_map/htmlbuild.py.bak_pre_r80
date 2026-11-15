@@ -1,0 +1,301 @@
+"""Encode pipeline outputs into a single self-contained HTML page.
+
+Numeric columns are base64'd typed arrays rather than JSON numbers: 72k
+floats as JSON is roughly 10x the bytes and parses far slower.
+"""
+from __future__ import annotations
+
+import base64
+import gzip
+import json
+from pathlib import Path
+from typing import Sequence
+
+import numpy as np
+
+INT16_MAX = 32767
+
+
+def encode_floats(arr) -> str:
+    return base64.b64encode(
+        np.asarray(arr, dtype="<f4").tobytes()).decode("ascii")
+
+
+def encode_ints(arr, dtype: str = "int32") -> str:
+    code = {"int32": "<i4", "int16": "<i2", "uint8": "|u1"}[dtype]
+    return base64.b64encode(
+        np.asarray(arr).astype(code).tobytes()).decode("ascii")
+
+
+def encode_strings(values: Sequence[str]) -> str:
+    """gzip+base64 a list of strings, newline-joined.
+
+    Design ids share long repetitive prefixes
+    ("csy4free_RFD3_LiMPNN_len80_..."), so raw JSON is ~10x the bytes for no
+    benefit. The page already vendors fflate to inflate the medoid payload,
+    so the browser side costs nothing extra.
+    """
+    blob = "\n".join("" if v is None else str(v) for v in values).encode()
+    return base64.b64encode(gzip.compress(blob, 9)).decode("ascii")
+
+
+def encode_categorical(values: Sequence) -> tuple[list[str], str]:
+    """Return (sorted lookup, base64 int16 codes). Missing values encode as -1."""
+    clean = [None if v is None or (isinstance(v, float) and np.isnan(v)) else str(v)
+             for v in values]
+    lookup = sorted({v for v in clean if v is not None})
+    if len(lookup) > INT16_MAX:
+        raise ValueError(f"too many categories for int16 codes: {len(lookup)}")
+    index = {name: i for i, name in enumerate(lookup)}
+    codes = np.array([index[v] if v is not None else -1 for v in clean],
+                     dtype="<i2")
+    return lookup, base64.b64encode(codes.tobytes()).decode("ascii")
+
+
+def bake(payload: dict, template: Path, app_js: Path, style_css: Path,
+         out: Path) -> int:
+    """Substitute payload, vendored libs, JS and CSS into the template."""
+    vendor = template.parent / "vendor"
+    html = template.read_text()
+    html = html.replace("/*__STYLE__*/", style_css.read_text())
+    html = html.replace("/*__FFLATE__*/",
+                        (vendor / "fflate.min.js").read_text())
+    html = html.replace("/*__3DMOL__*/",
+                        (vendor / "3Dmol-min.js").read_text())
+    html = html.replace("/*__APP__*/", app_js.read_text())
+    html = html.replace(
+        '"__PAYLOAD__"',
+        json.dumps(payload, separators=(",", ":"), allow_nan=False),
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(html)
+    return out.stat().st_size
+
+
+LAYERS = ("design", "af3", "esm")
+AXES = ("fold", "epitope")
+
+# How many structures to embed per cluster. Embedding all ~180k complexes
+# produces a page nobody can open; embedding a handful per cluster covers the
+# "show me what this cluster looks like" case, and anything else is one click
+# away in ChimeraX with full sidechains.
+PER_CLUSTER = 4
+
+
+def _representative_nodes(layer_dir: Path, n: int) -> "np.ndarray":
+    """Node ids worth embedding: the medoid plus a few members per cluster.
+
+    Taken across every axis and resolution and unioned, so whichever view the
+    user is in, the clusters they can see have structures behind them.
+    """
+    import pandas as pd
+
+    keep: set[int] = set()
+    for axis in AXES:
+        cpath = layer_dir / "clusters" / axis / "clusters.parquet"
+        if not cpath.exists():
+            continue
+        clusters = pd.read_parquet(cpath).sort_values("node_id")
+        mpath = layer_dir / "clusters" / axis / "medoids.parquet"
+        if mpath.exists():
+            keep.update(int(v) for v in pd.read_parquet(mpath)["node_id"])
+        for resolution in ("cluster_r05", "cluster_r10", "cluster_r20"):
+            if resolution not in clusters:
+                continue
+            labels = clusters[resolution].to_numpy()
+            node_ids = clusters["node_id"].to_numpy()
+            order = np.argsort(labels, kind="stable")
+            lab_sorted, id_sorted = labels[order], node_ids[order]
+            starts = np.flatnonzero(np.r_[True, lab_sorted[1:] != lab_sorted[:-1]])
+            for a, b in zip(starts, np.r_[starts[1:], len(lab_sorted)]):
+                # Evenly spaced members, so the sample spans the cluster
+                # rather than clumping at whichever end sorted first.
+                idx = np.linspace(a, b - 1, min(PER_CLUSTER, b - a)).astype(int)
+                keep.update(int(v) for v in id_sorted[idx])
+    return np.array(sorted(keep), dtype=np.int64)
+
+
+def build_payload(results: Path, build: Path) -> dict:
+    """Assemble the explorer payload from the pipeline outputs."""
+    import pandas as pd
+
+    meta = pd.read_parquet(build / "meta" / "designs.parquet")
+    counts = json.loads((build / "meta" / "counts.json").read_text())
+
+    numeric_columns = [
+        "dockq_af3", "dockq_esm", "iptm_mean", "iptm_min",
+        "rmsd_af3", "rmsd_esm", "dsasa_af3", "dsasa_esm",
+        "hb_af3", "hb_esm", "rog_af3", "rog_esm",
+        "pose_disagree", "fold_disagree",
+    ]
+
+    agreement_path = results / "compare" / "epitope_agreement.parquet"
+    agreement = (pd.read_parquet(agreement_path).set_index("design_id")
+                 if agreement_path.exists() else None)
+
+    payload: dict = {"layers": {}, "meta": counts, "compare": {}}
+
+    for layer in LAYERS:
+        layer_dir = results / layer
+        if not (layer_dir / "dedup" / "nodes.tsv").exists():
+            continue
+        nodes = pd.read_csv(layer_dir / "dedup" / "nodes.tsv", sep="\t")
+        members = pd.read_csv(layer_dir / "dedup" / "members.tsv", sep="\t")
+        nodes = nodes.merge(members, on="struct_name", how="left")
+
+        # Node-level metadata comes from the canonical structure's own row.
+        node_meta = meta.set_index("design_id").reindex(nodes["struct_name"])
+
+        entry: dict = {
+            "n": int(len(nodes)),
+            "struct_names_gz": encode_strings(nodes["struct_name"].tolist()),
+            "design_ids_gz": encode_strings(nodes["design_ids"].fillna("").tolist()),
+            "n_designs": encode_ints(nodes["n_designs"].to_numpy(), "int32"),
+            "categorical": {},
+            "numeric": {},
+            "axes": {},
+        }
+        for column in ("stack", "campaign", "gen", "invfold"):
+            lookup, codes = encode_categorical(node_meta[column].tolist())
+            entry["categorical"][column] = {"lookup": lookup, "codes": codes}
+        for column in numeric_columns:
+            if column in node_meta:
+                values = pd.to_numeric(node_meta[column], errors="coerce")
+                entry["numeric"][column] = encode_floats(
+                    values.fillna(np.nan).to_numpy())
+
+        canonical_fp = layer_dir / "fp" / "canonical.parquet"
+        if canonical_fp.exists():
+            fp = pd.read_parquet(canonical_fp)
+            per_nt = [f"per_nt_{i}" for i in range(1, 17)]
+            entry["per_nt"] = encode_ints(
+                np.clip(fp[per_nt].to_numpy(), 0, INT16_MAX), "int16")
+            for column in ("cx", "cy", "cz", "ax", "ay", "az"):
+                entry["numeric"][column] = encode_floats(fp[column].to_numpy())
+            entry["numeric"]["contacts_total"] = encode_floats(
+                fp["contacts_total"].to_numpy())
+
+        if agreement is not None:
+            for column in agreement.columns:
+                values = agreement[column].reindex(nodes["struct_name"])
+                entry["numeric"][column] = encode_floats(
+                    values.fillna(np.nan).to_numpy())
+
+        for axis in AXES:
+            embed_path = layer_dir / "embed" / axis / "embed.parquet"
+            cluster_path = layer_dir / "clusters" / axis / "clusters.parquet"
+            if not embed_path.exists() or not cluster_path.exists():
+                continue
+            coords = pd.read_parquet(embed_path).sort_values("node_id")
+            clusters = pd.read_parquet(cluster_path).sort_values("node_id")
+            graph_nodes = pd.read_parquet(
+                layer_dir / "graph" / axis / "nodes.parquet").sort_values("node_id")
+            axis_entry = {
+                "x": encode_floats(coords["x"].to_numpy()),
+                "y": encode_floats(coords["y"].to_numpy()),
+                "redundancy": encode_ints(
+                    graph_nodes["redundancy"].to_numpy(), "int32"),
+                "is_isolate": encode_ints(
+                    graph_nodes["is_isolate"].to_numpy().astype(np.uint8), "uint8"),
+                "clusters": {
+                    name: encode_ints(clusters[name].to_numpy(), "int32")
+                    for name in ("cluster_r05", "cluster_r10", "cluster_r20")
+                },
+            }
+            medoid_path = layer_dir / "clusters" / axis / "medoids.parquet"
+            if medoid_path.exists():
+                medoid = pd.read_parquet(medoid_path)
+                axis_entry["medoids"] = {
+                    resolution: {
+                        str(int(r.cluster)): {"node": int(r.node_id),
+                                              "name": r.struct_name,
+                                              "size": int(r.size)}
+                        for r in group.itertuples()
+                    }
+                    for resolution, group in medoid.groupby("resolution")
+                }
+            interface = layer_dir / "graph" / axis / "interface.parquet"
+            if interface.exists():
+                iface = pd.read_parquet(interface).sort_values("node_id")
+                axis_entry["has_interface"] = encode_ints(
+                    iface["has_interface"].to_numpy().astype(np.uint8), "uint8")
+            entry["axes"][axis] = axis_entry
+
+        # Per-design CA traces, so clicking a point shows THAT design rather
+        # than its cluster's medoid. Already gzipped int16 on disk; passed
+        # through verbatim and sliced in the browser.
+        # Archive refs for the ChimeraX handoff. open_refolds_server's
+        # /openset wants RB-relative "<archive>!<member>" strings, one per
+        # layer, so the viewer can open the real structure with sidechains.
+        try:
+            refs = {}
+            for lname, column in (("design", "design_cif"), ("af3", "af3_cif"),
+                                  ("esm", "esm_cif")):
+                man = pd.read_csv(build / "manifests" / f"{lname}.tsv", sep="\t")
+                man["ref"] = man["archive_path"] + "!" + man["member_path"]
+                lookup = man.set_index("design_id")["ref"]
+                refs[lname] = lookup.reindex(nodes["struct_name"]).fillna("").tolist()
+            for lname, values in refs.items():
+                entry[f"ref_{lname}_gz"] = encode_strings(values)
+        except Exception:
+            pass
+
+        # Prefer a re-gridded blob when one exists: 0.1 A is finer than these
+        # backbone models justify and costs ~25% more page weight.
+        cx = layer_dir / "complex" / "complex_g02.bin.gz"
+        grid = 0.2
+        if not cx.exists():
+            cx = layer_dir / "complex" / "complex_int16.bin.gz"
+            grid = 0.1
+        sse = layer_dir / "complex" / "sse.bin.gz"
+        if cx.exists() and sse.exists():
+            import gzip as _gz
+            raw = _gz.decompress(cx.read_bytes())
+            allc = np.frombuffer(raw, dtype="<i2").reshape(-1, 368, 3)
+            rep = _representative_nodes(layer_dir, len(nodes))
+            rep = rep[rep < len(allc)]
+            sub = np.ascontiguousarray(allc[rep])
+            sse_all = np.frombuffer(_gz.decompress(sse.read_bytes()),
+                                    dtype=np.uint8).reshape(-1, 80)
+            entry["complex_gz"] = base64.b64encode(
+                _gz.compress(sub.tobytes(), 9)).decode("ascii")
+            entry["sse_gz"] = base64.b64encode(
+                _gz.compress(np.ascontiguousarray(sse_all[rep]).tobytes(), 9)
+            ).decode("ascii")
+            entry["complex_ids"] = encode_ints(rep.astype(np.int32), "int32")
+            print(f"    {layer}: embedded {len(rep):,} of {len(nodes):,} complexes "
+                  f"({PER_CLUSTER}/cluster across axes and resolutions)")
+            entry["n_prot_atoms"] = 320
+            entry["n_rna_atoms"] = 48
+            entry["n_res"] = 80
+            entry["n_nt"] = 16
+            entry["complex_grid"] = grid
+
+        # The CA-only blob is a fallback for points with no embedded complex.
+        # It is the single largest item in the payload (17 MB gzipped for a
+        # refold layer), and every point that lacks a complex now routes to
+        # ChimeraX instead, so it earns its weight only when no complex exists
+        # at all.
+        traces = layer_dir / "traces" / "ca_int16.bin.gz"
+        if traces.exists() and "complex_gz" not in entry:
+            entry["ca_traces_gz"] = base64.b64encode(
+                traces.read_bytes()).decode("ascii")
+            entry["ca_nres"] = 80
+
+        medoid_blob = layer_dir / "medoids" / "medoids.json.gz"
+        if medoid_blob.exists():
+            entry["medoid_traces"] = base64.b64encode(
+                medoid_blob.read_bytes()).decode("ascii")
+
+        payload["layers"][layer] = entry
+
+    scores = results / "compare" / "partition_scores.parquet"
+    if scores.exists():
+        payload["compare"]["partition_scores"] = (
+            pd.read_parquet(scores).to_dict(orient="records"))
+    profiles = results / "compare" / "stack_profiles.parquet"
+    if profiles.exists():
+        payload["compare"]["stack_profiles"] = (
+            pd.read_parquet(profiles).to_dict(orient="records"))
+
+    return payload

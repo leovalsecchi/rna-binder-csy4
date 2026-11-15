@@ -1,0 +1,226 @@
+_meta:
+  cluster: euler
+  probed_at: '2026-07-15'
+refold_af3:
+  runs_on:
+  - gpu
+  - gpuhe
+  - gpupr
+  n_jobs_measured: 14046
+  vram_floor_g: 24.0
+  req_gpumem_g: 24
+  memory_elastic: true
+  vram_by_pool:
+    gpu:
+      vram_p95_g: 22.48
+      card_g: 24
+      grabbing: true
+    gpuhe:
+      vram_p95_g: 22.76
+      card_g: 24
+      grabbing: true
+  gpuutil_pct: 92
+  host_mem_peak_g: 31.96
+  median_job_s: 3346
+  p95_job_s: 13523
+  units_per_job: 1
+  sec_per_unit: 3346.0
+  walltime_tier: 24h
+  qos_concurrency:
+    gpu: 50
+    gpuhe: 50
+    gpupr: 50
+  measured_at: '2026-07-15'
+  source: history-harvest (30d)
+refold_b2:
+  runs_on:
+  - gpu
+  - gpuhe
+  n_jobs_measured: 11266
+  vram_floor_g: 2.69
+  req_gpumem_g: 8
+  memory_elastic: false
+  vram_by_pool:
+    gpu:
+      vram_p95_g: 2.44
+      card_g: 24
+      grabbing: false
+    gpuhe:
+      vram_p95_g: 2.69
+      card_g: 24
+      grabbing: false
+  gpuutil_pct: 61
+  host_mem_peak_g: 8.51
+  median_job_s: 5976
+  p95_job_s: 6881
+  units_per_job: 1
+  sec_per_unit: 5976.0
+  walltime_tier: 4h
+  qos_concurrency:
+    gpu: 96
+    gpuhe: 96
+  measured_at: '2026-07-15'
+  source: history-harvest (30d)
+refold_esm:
+  runs_on:
+  - gpu
+  - gpuhe
+  - gpupr
+  n_jobs_measured: 4814
+  vram_floor_g: 13.67
+  req_gpumem_g: 16
+  memory_elastic: true
+  vram_by_pool:
+    gpuhe:
+      vram_p95_g: 22.76
+      card_g: 24
+      grabbing: true
+    gpu:
+      vram_p95_g: 22.48
+      card_g: 24
+      grabbing: true
+    gpupr:
+      vram_p95_g: 13.67
+      card_g: 80
+      grabbing: false
+  gpuutil_pct: 91
+  host_mem_peak_g: 31.96
+  median_job_s: 1852
+  p95_job_s: 12767
+  units_per_job: 1
+  sec_per_unit: 1852.0
+  walltime_tier: 24h
+  qos_concurrency:
+    gpu: 50
+    gpuhe: 50
+    gpupr: 50
+  measured_at: '2026-07-15'
+  source: history-harvest (30d)
+halludesign:
+  runs_on:
+  - gpuhe
+  - gpupr
+  n_jobs_measured: 929
+  vram_floor_g: 24.0
+  req_gpumem_g: 24
+  memory_elastic: true
+  vram_by_pool:
+    gpuhe:
+      vram_p95_g: 22.43
+      card_g: 24
+      grabbing: true
+    gpupr:
+      vram_p95_g: 77.69
+      card_g: 80
+      grabbing: true
+  gpuutil_pct: 96
+  host_mem_peak_g: 26.72
+  median_job_s: 12576
+  p95_job_s: 17270
+  units_per_job: 150
+  sec_per_unit: 83.8
+  walltime_tier: 24h
+  qos_concurrency:
+    gpuhe: 50
+    gpupr: 50
+  measured_at: '2026-07-15'
+  source: history-harvest (30d)
+rfd3:
+  runs_on:
+  - gpu
+  - gpuhe
+  - gpupr
+  n_jobs_measured: 1871
+  vram_floor_g: 4.25
+  req_gpumem_g: 8
+  memory_elastic: false
+  vram_by_pool:
+    gpuhe:
+      vram_p95_g: 4.21
+      card_g: 24
+      grabbing: false
+    gpu:
+      vram_p95_g: 3.95
+      card_g: 24
+      grabbing: false
+    gpupr:
+      vram_p95_g: 4.25
+      card_g: 80
+      grabbing: false
+  gpuutil_pct: 93
+  host_mem_peak_g: 10.16
+  median_job_s: 1967
+  p95_job_s: 6158
+  units_per_job: 595
+  sec_per_unit: 3.3
+  walltime_tier: 4h
+  qos_concurrency:
+    gpu: 96
+    gpuhe: 96
+    gpupr: null
+  measured_at: '2026-07-15'
+  source: history-harvest (30d)
+boltzgen:
+  runs_on:
+  - gpu
+  - gpuhe
+  n_jobs_measured: 1654
+  vram_floor_g: 4.4
+  req_gpumem_g: 8
+  memory_elastic: false
+  vram_by_pool:
+    gpuhe:
+      vram_p95_g: 4.4
+      card_g: 24
+      grabbing: false
+    gpu:
+      vram_p95_g: 4.14
+      card_g: 24
+      grabbing: false
+  gpuutil_pct: 95
+  host_mem_peak_g: 8.91
+  median_job_s: 8628
+  p95_job_s: 10546
+  units_per_job: 608
+  sec_per_unit: 14.2
+  walltime_tier: 4h
+  qos_concurrency:
+    gpu: 96
+    gpuhe: 96
+  measured_at: '2026-07-15'
+  source: history-harvest (30d)
+boltzdesign:
+  runs_on:
+  - gpu
+  - gpuhe
+  - gpupr
+  n_jobs_measured: 1293
+  vram_floor_g: 6.68
+  req_gpumem_g: 8
+  memory_elastic: true
+  vram_by_pool:
+    gpuhe:
+      vram_p95_g: 6.68
+      card_g: 24
+      grabbing: false
+    gpupr:
+      vram_p95_g: 77.69
+      card_g: 80
+      grabbing: true
+    gpu:
+      vram_p95_g: 6.35
+      card_g: 24
+      grabbing: false
+  gpuutil_pct: 98
+  host_mem_peak_g: 9.31
+  median_job_s: 22892
+  p95_job_s: 24041
+  units_per_job: 600
+  sec_per_unit: 38.2
+  walltime_tier: 24h
+  qos_concurrency:
+    gpu: 50
+    gpuhe: 50
+    gpupr: 50
+  measured_at: '2026-07-15'
+  source: history-harvest (30d)

@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# tally.sh — midrun_v2 designs & refolds tally (CACHED; scan is ~4 min / Lustre-bound).
+#   tally          -> print cached table instantly (first run populates the cache)
+#   tally -r       -> force a fresh scan (~4 min) and update the cache
+#   tally -r out.md-> also write markdown to out.md
+# Refold columns: AF3 (msaoff), ESM, B2. AF3 msaon is deactivated (was the old
+# "AF3-on" column; ESM took its slot 2026-06-18).
+set -u
+RB=/cluster/work/wicky/lvalsecchi/rna_binder
+CAMP=$RB/campaigns/csy4_crrna_free
+STACKS="rfd3__ligandmpnn boltzdesign__ligandmpnn boltzgen__boltzif boltzgen__ligandmpnn halludesign__ligandmpnn"
+CACHE=$RB/.cache/tally.txt
+MODE=show
+if [ "${1:-}" = "-r" ] || [ "${1:-}" = "--refresh" ]; then MODE=refresh; shift; fi
+OUT="${1:-$HOME/tally_$(date +%d%m).md}"
+commafy(){ echo "$1" | sed -E ':a;s/([0-9])([0-9]{3})($|,)/\1,\2\3/;ta'; }
+pct(){ if [ "$2" -gt 0 ]; then echo $((100*$1/$2)); else echo 0; fi; }
+pcat(){ printf '%s\n' "$@" 2>/dev/null | grep -v '[*]' | xargs -r -P 16 -n 40 cat 2>/dev/null; }
+render(){
+  echo "scanning $(echo $STACKS|wc -w) stacks (~3-4 min)..." >&2
+  declare -a NM SL DP DL OFF ESM B2 RF
+  local TS=0 TDP=0 TDL=0 TOFF=0 TESM=0 TB2=0 TREF=0 i=0
+  for S in $STACKS; do
+    m=$CAMP/$S/midrun_v2; [ -d "$m" ] || continue
+    printf "  %-26s " "$S" >&2
+    nslice=$(ls $m/designs/*.tar.zst 2>/dev/null | wc -l)
+    read mcif mpdb < <(pcat $m/designs/*.tar.zst.list | awk '/\.cif$/{c++} /\.pdb$/{p++} END{print (c+0)" "(p+0)}')
+    lpdb=$(ls $m/designs/*.pdb 2>/dev/null | wc -l); lcif=$(ls $m/designs/*.cif 2>/dev/null | wc -l)
+    dp=$((mcif+mpdb)); dl=$((lpdb+lcif))
+    roff=$(find "$m/refold_af3" -mindepth 3 -maxdepth 3 -type d -path '*/msaoff_*/outputs/*' 2>/dev/null | wc -l)
+    poff=$(pcat $m/refold_af3/msaoff_*/outputs.tar.zst.list | grep -c summary_confidences); off=$((roff+poff))
+    b2pk=$(pcat $m/refold_b2/msaoff_*/designs.tar.zst.list | grep -cE '\.cif$')
+    b2raw=$(find "$m/refold_b2" -mindepth 3 -maxdepth 3 -type f -path '*/msaoff_*/designs/*.cif' 2>/dev/null | wc -l)
+    b2=$((b2pk+b2raw))
+    esmpk=$(pcat $m/refold_esm/msaoff*/designs.tar.zst.list 2>/dev/null | grep -cE '\.cif$')
+    esmraw=$(find "$m/refold_esm" -mindepth 3 -maxdepth 3 -type f -path '*/msaoff*/designs/*.cif' 2>/dev/null | wc -l)
+    esm=$((esmpk+esmraw)); ref=$((off+b2+esm))
+    NM[$i]=$(echo $S|sed 's#__#/#;s/ligandmpnn/limpnn/'); SL[$i]=$nslice; DP[$i]=$dp; DL[$i]=$dl; OFF[$i]=$off; ESM[$i]=$esm; B2[$i]=$b2; RF[$i]=$ref
+    TS=$((TS+nslice));TDP=$((TDP+dp));TDL=$((TDL+dl));TOFF=$((TOFF+off));TESM=$((TESM+esm));TB2=$((TB2+b2));TREF=$((TREF+ref)); i=$((i+1))
+    echo "done" >&2
+  done
+  local N=$i TD=$((TDP+TDL)) DSTR; DSTR=$(date '+%Y-%m-%d %H:%M')
+  local FMT="%-20s %7s %12s %7s %9s %9s %10s %12s\n"
+  local SEP="---------------------------------------------------------------------------------------------"
+  echo "midrun_v2 — designs & refolds tally  (generated $DSTR)"; echo
+  printf "$FMT" stack uuids designs loose AF3 ESM B2 refolds; echo "$SEP"
+  for ((j=0;j<N;j++)); do printf "$FMT" "${NM[$j]}" "${SL[$j]}" "$(commafy ${DP[$j]})" "$(commafy ${DL[$j]})" "$(commafy ${OFF[$j]})" "$(commafy ${ESM[$j]})" "$(commafy ${B2[$j]})" "$(commafy ${RF[$j]})"; done
+  echo "$SEP"; printf "$FMT" TOTAL "$TS" "$(commafy $TDP)" "$(commafy $TDL)" "$(commafy $TOFF)" "$(commafy $TESM)" "$(commafy $TB2)" "$(commafy $TREF)"
+  echo; echo "Refold coverage (% of packed designs):"
+  for ((j=0;j<N;j++)); do printf "  %-20s AF3 %3s%%   ESM %3s%%   B2 %3s%%\n" "${NM[$j]}" "$(pct ${OFF[$j]} ${DP[$j]})" "$(pct ${ESM[$j]} ${DP[$j]})" "$(pct ${B2[$j]} ${DP[$j]})"; done
+  {
+    echo "# midrun_v2 — designs & refolds tally ($DSTR)"; echo
+    echo "| stack | gen uuids | designs (packed) | designs (loose) | AF3 | ESM | B2 | refolds total |"
+    echo "|---|--:|--:|--:|--:|--:|--:|--:|"
+    for ((j=0;j<N;j++)); do echo "| ${NM[$j]} | ${SL[$j]} | $(commafy ${DP[$j]}) | $(commafy ${DL[$j]}) | $(commafy ${OFF[$j]}) | $(commafy ${ESM[$j]}) | $(commafy ${B2[$j]}) | **$(commafy ${RF[$j]})** |"; done
+    echo "| **TOTAL** | **$TS** | **$(commafy $TDP)** | **$(commafy $TDL)** | **$(commafy $TOFF)** | **$(commafy $TESM)** | **$(commafy $TB2)** | **$(commafy $TREF)** |"
+  } > "$OUT" 2>/dev/null
+}
+if [ "$MODE" = "show" ] && [ -f "$CACHE" ]; then
+  cat "$CACHE"
+  age=$(( ($(date +%s) - $(stat -c %Y "$CACHE")) / 60 ))
+  echo; echo "(cached — ${age} min old; run 'tally -r' to refresh)"
+  exit 0
+fi
+mkdir -p "$(dirname "$CACHE")"
+render | tee "$CACHE.tmp" >/dev/null && mv "$CACHE.tmp" "$CACHE"
+cat "$CACHE"

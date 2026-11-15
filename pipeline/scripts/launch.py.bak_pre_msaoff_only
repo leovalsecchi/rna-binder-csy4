@@ -1,0 +1,1448 @@
+"""
+launch.py — submit a campaign run from a config YAML.
+
+Usage:
+    python launch.py <config.yaml> [--label NAME] [--override KEY=VAL]...
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import uuid
+from datetime import datetime
+from pathlib import Path
+
+import yaml
+
+# --- abbreviation tables (locked 2026-05-21) -----------------------------
+GEN_ABBR = {
+    "rfd3":         "RFD3",
+    "halludesign":  "HD",
+    "boltzgen":     "BG",
+    "boltzdesign":  "BD1",
+}
+INVFOLD_ABBR = {
+    "ligandmpnn":   "LiMPNN",
+    "boltzif":      "BIF",
+}
+TARGET_ABBR = {
+    "csy4_crrna_free":  "csy4free",
+}
+
+PROJECT_ROOT = Path("/cluster/work/wicky/lvalsecchi/rna_binder")
+CAMPAIGNS_DIR = PROJECT_ROOT / "campaigns"
+
+
+def parse_overrides(overrides):
+    """Convert ['a.b=1', 'c=hello'] into {'a': {'b': 1}, 'c': 'hello'}."""
+    out = {}
+    for ov in overrides:
+        if "=" not in ov:
+            sys.exit(f"override must be KEY=VALUE, got: {ov}")
+        key, val = ov.split("=", 1)
+        # Try to parse val as int/float/bool/json
+        if val.lower() == "true":   val = True
+        elif val.lower() == "false": val = False
+        elif val and val[0] in "[{":
+            try:    val = json.loads(val)   # e.g. model_seeds=[1,2,3]
+            except json.JSONDecodeError:  pass  # leave as string
+        else:
+            try:    val = int(val)
+            except ValueError:
+                try:    val = float(val)
+                except ValueError:  pass  # leave as string
+        # Walk nested keys
+        d = out
+        keys = key.split(".")
+        for k in keys[:-1]:
+            d = d.setdefault(k, {})
+        d[keys[-1]] = val
+    return out
+
+
+def deep_merge(base, overrides):
+    """Recursively merge overrides into base. Returns a new dict."""
+    out = dict(base)
+    for k, v in overrides.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def gen_uuid8():
+    """Generate an 8-char hex UUID."""
+    return uuid.uuid4().hex[:8]
+
+
+def make_run_dir(config, label, uuid8):
+    """Return Path to the run dir (does NOT create it)."""
+    target = config["target_id"]
+    stack = f"{config['generator']}__{config['inverse_folder']}"
+    return CAMPAIGNS_DIR / target / stack / f"{label}_{uuid8}"
+
+
+def design_name_prefix(config, uuid8, length):
+    """
+    Build the prefix for design output filenames:
+        <target>_<gen>_<invfold>_len<N>_<uuid8>
+    """
+    return "_".join([
+        TARGET_ABBR.get(config["target_id"], config["target_id"]),
+        GEN_ABBR[config["generator"]],
+        INVFOLD_ABBR[config["inverse_folder"]],
+        f"len{length}",
+        uuid8,
+    ])
+
+
+# --- per-generator sbatch builders --------------------------------------
+
+def build_rfd3_sbatch(config, run_dir, uuid8, shared_designs_dir=None):
+    """Build an RFD3 sbatch string."""
+    slurm = config["slurm"]
+    gp = config["generator_params"]
+    cwd = gp["cwd"]
+    input_json = gp["inputs"]
+    n_batches = gp.get("n_batches", 1)
+    # Derived
+    prefix = design_name_prefix(config, uuid8, length=80)  # rfd3 hardcoded in input JSON
+    out_dir = shared_designs_dir if shared_designs_dir else run_dir / "designs"
+
+    return f"""#!/bin/bash
+#SBATCH --job-name=rfd3_{uuid8}
+#SBATCH --partition={slurm['partition']}
+#SBATCH --time={slurm['time']}
+#SBATCH --gpus={slurm['gpus']}
+{('#SBATCH --nodelist=' + slurm['nodelist']) if slurm.get('nodelist') else ''}
+#SBATCH --cpus-per-task={slurm['cpus_per_task']}
+#SBATCH --mem-per-cpu={slurm['mem_per_cpu']}
+#SBATCH --output={run_dir}/slurm.log
+#SBATCH --error={run_dir}/slurm.err
+
+set -euo pipefail
+
+source {config['container']['activate_script']}
+
+cd {cwd}
+
+mkdir -p {out_dir}
+
+echo "=== Job started: $(date) ==="
+nvidia-smi -L || true
+
+START=$SECONDS
+frun rfd3 design \\
+    out_dir={out_dir} \\
+    inputs={Path(input_json).name} \\
+    n_batches={n_batches} \\
+    prevalidate_inputs={str(gp.get('prevalidate_inputs', True)).lower()} \\
+    skip_existing={str(gp.get('skip_existing', False)).lower()}
+ELAPSED=$((SECONDS - START))
+
+# Rename outputs to canonical scheme: <prefix>_designN.cif.gz
+# Uses a running counter so design indices are unique across all batches.
+# Previously used model_<N> suffix which collided across batches and silently
+# overwrote files (n_batches > 1 was effectively broken before this fix).
+cd {out_dir}
+n=0
+for f in $(ls *.cif.gz 2>/dev/null | sort); do
+    new="{prefix}_design${{n}}.cif.gz"
+    mv "$f" "$new"
+    # Rename matching .json sidecar if present
+    base="${{f%.cif.gz}}"
+    [ -f "$base.json" ] && mv "$base.json" "{prefix}_design${{n}}.json"
+    n=$((n + 1))
+done
+
+N_CIF=$n
+echo "=== Done in ${{ELAPSED}}s ==="
+echo "Designs produced: $N_CIF"
+"""
+
+
+def build_halludesign_sbatch(config, run_dir, uuid8, shared_designs_dir=None):
+    """Build a HalluDesign sbatch string."""
+    slurm = config["slurm"]
+    c = config["container"]
+    gp = config["generator_params"]
+    p = gp["params"]
+    # HD writes ALL output (recycle_N/, processing_results.csv, jax cache) under
+    # --output_dir, and run_dir is uuid8-unique, so a per-run private dir fully
+    # isolates parallel --num-runs>1 jobs (no shared state to collide on). The
+    # non-multif refold already runs per-run on run_dir. (shared_designs_dir
+    # caused collisions: HD recycle_N/ intermediate names are NOT uuid8-scoped.)
+    out_dir = run_dir / "designs"
+
+    # Build env --env flags
+    env_flags = " \\\n  ".join(f"--env {k}={v}" for k, v in c["envs"].items())
+    bind_flags = " \\\n  ".join(f"--bind {b}" for b in c["binds"])
+
+    # Build the python args. random_init and CoDP are boolean flags.
+    FLAG_ARGS = {"random_init", "CoDP"}
+    cli_args = []
+    for k, v in p.items():
+        if k in FLAG_ARGS:
+            if v:
+                cli_args.append(f"--{k}")
+        else:
+            cli_args.extend([f"--{k}", str(v)])
+    cli_args_str = " \\\n      ".join(cli_args)
+
+    return f"""#!/bin/bash
+#SBATCH --job-name=hd_{uuid8}
+#SBATCH --requeue
+#SBATCH --open-mode=append
+#SBATCH --partition={slurm.get('partition', 'gpuhe.24h')}
+#SBATCH --ntasks={slurm.get('ntasks', 4)}
+#SBATCH --nodes={slurm.get('nodes', 1)}
+#SBATCH --mem-per-cpu={slurm['mem_per_cpu']}
+#SBATCH --gpus={slurm['gpus']}
+{('#SBATCH --nodelist=' + slurm['nodelist']) if slurm.get('nodelist') else ''}
+{('#SBATCH --gres=' + slurm['gres']) if slurm.get('gres') else ''}
+#SBATCH --time={slurm['time']}
+#SBATCH --output={run_dir}/slurm.log
+#SBATCH --error={run_dir}/slurm.err
+
+set -euo pipefail
+echo "=== Job started: $(date) ==="
+echo "=== Host: $(hostname) ==="
+nvidia-smi || true
+
+export CONTAINER={c['sif']}
+OUTDIR={out_dir}
+# Idempotent restart (safe under --requeue): OUTDIR is uuid8-private (run_dir/designs),
+# so wiping it clears any partial recycle_N/ from a preempted attempt; no other job touched.
+rm -rf "$OUTDIR"
+mkdir -p "$OUTDIR"
+
+apptainer {c['apptainer_cmd']} --nv \\
+  --home {c['home']} \\
+  {bind_flags} \\
+  {env_flags} \\
+  $CONTAINER \\
+  bash -c '
+    export PATH=/usr/local/cuda-real/bin:$PATH
+    cd {gp['workdir']} && \\
+    {gp['entrypoint']} \\
+      {cli_args_str} \\
+      --output_dir '"$OUTDIR"'
+  '
+
+echo "=== HD inference finished, running postprocess: $(date) ==="
+bash /cluster/work/wicky/lvalsecchi/rna_binder/code/scripts/stages/postprocess_halludesign.sh \
+  "{run_dir}" "{shared_designs_dir or ''}"
+echo "=== Job finished: $(date) ==="
+"""
+
+
+def build_boltzgen_sbatch(config, run_dir, uuid8, shared_designs_dir=None):
+    """Build a BoltzGen sbatch string."""
+    slurm = config["slurm"]
+    c = config["container"]
+    gp = config["generator_params"]
+    out_dir = shared_designs_dir if shared_designs_dir else run_dir / "output"
+
+    env_flags = " \\\n    ".join(f"--env {k}={v}" for k, v in c["envs"].items())
+    bind_flags = " \\\n    ".join(f"--bind {b}" for b in c["binds"])
+
+    # Build CLI flags
+    flags = gp["cli"]["flags"]
+    flag_args = []
+    for k, v in flags.items():
+        if isinstance(v, list):
+            v = " ".join(str(x) for x in v)
+        flag_args.append(f"--{k} {v}")
+    flag_str = " \\\n        ".join(flag_args)
+
+    # Serialize spec as YAML inline
+    spec_yaml = yaml.dump(gp["spec"], default_flow_style=False)
+
+    return f"""#!/bin/bash
+#SBATCH --job-name=bg_{uuid8}
+#SBATCH --partition={slurm['partition']}
+#SBATCH --time={slurm['time']}
+#SBATCH --gpus={slurm['gpus']}
+{('#SBATCH --nodelist=' + slurm['nodelist']) if slurm.get('nodelist') else ''}
+{('#SBATCH --gres=' + slurm['gres']) if slurm.get('gres') else ''}
+#SBATCH --cpus-per-task={slurm['cpus_per_task']}
+#SBATCH --mem-per-cpu={slurm['mem_per_cpu']}
+#SBATCH --output={run_dir}/slurm.log
+#SBATCH --error={run_dir}/slurm.err
+
+set -eu
+
+RUN_DIR={run_dir}
+mkdir -p "$RUN_DIR"
+cd "$RUN_DIR"
+
+cp /cluster/work/wicky/lvalsecchi/rna_binder/targets/csy4_crrna_free/csy4_rna_only.pdb .
+cat > spec.yaml <<EOF_SPEC
+{spec_yaml}EOF_SPEC
+
+OUT_DIR="$RUN_DIR/output"
+mkdir -p "$OUT_DIR"
+
+echo "=== Job started: $(date) ==="
+nvidia-smi -L
+
+apptainer {c['apptainer_cmd']} --nv \\
+    --home {c['home']} \\
+    {bind_flags} \\
+    {env_flags} \\
+    {c['sif']} \\
+    {gp['cli']['command']} {gp['cli']['spec_arg']} \\
+        --output "$OUT_DIR" \\
+        {flag_str}
+
+echo "=== Job finished: $(date) ==="
+"""
+
+
+
+def build_boltzdesign_sbatch(config, run_dir, uuid8, shared_designs_dir=None):
+    """Build a BoltzDesign1 sbatch string."""
+    slurm = config["slurm"]
+    c = config["container"]
+    gp = config["generator_params"]
+
+    boltz_cache = c["boltz_cache"]
+    sif = c["sif"]
+
+    # Build the --<key> <value> CLI args from generator_params (skip work_dir if present)
+    cli_args = []
+    for k, v in gp.items():
+        if k == "work_dir":
+            continue
+        cli_args.append(f"--{k} {shlex.quote(str(v))}")
+    cli_args_str = " ".join(cli_args)
+
+    # bind list (static + dynamic)
+    bind_sep = " \\\n    "
+    static_binds = bind_sep.join(f"--bind {b}" for b in c.get("binds", []))
+
+    return f"""#!/bin/bash
+#SBATCH --job-name={slurm.get('job_name', 'bd1')}_{uuid8}
+#SBATCH --partition={slurm.get('partition', 'gpuhe.24h')}
+#SBATCH --time={slurm['time']}
+#SBATCH --cpus-per-task={slurm['cpus_per_task']}
+#SBATCH --mem-per-cpu={slurm['mem_per_cpu']}
+#SBATCH --gpus={slurm['gpus']}
+{('#SBATCH --nodelist=' + slurm['nodelist']) if slurm.get('nodelist') else ''}
+{('#SBATCH --gres=' + slurm['gres']) if slurm.get('gres') else ''}
+#SBATCH --tmp={slurm['tmp']}
+#SBATCH --output={run_dir}/slurm.log
+#SBATCH --error={run_dir}/slurm.err
+
+set -euo pipefail
+
+RUN_DIR={run_dir}
+SIF={sif}
+BOLTZ_CACHE={boltz_cache}
+
+mkdir -p "${{RUN_DIR}}"
+
+# Ensure boltz cache exists (idempotent)
+mkdir -p "${{BOLTZ_CACHE}}/.boltz"
+ln -sfn /cluster/work/wicky/params/boltz/boltz1_conf.ckpt "${{BOLTZ_CACHE}}/.boltz/boltz1_conf.ckpt"
+ln -sfn /cluster/work/wicky/params/boltz/ccd.pkl "${{BOLTZ_CACHE}}/.boltz/ccd.pkl"
+
+# Fake HOME for matplotlib and other writes inside the container
+FAKE_HOME="${{TMPDIR}}/fake_home"
+mkdir -p "${{FAKE_HOME}}"
+export MPLCONFIGDIR="${{FAKE_HOME}}/.config/matplotlib"
+mkdir -p "${{MPLCONFIGDIR}}"
+
+echo "================================================================"
+echo " BoltzDesign1 launcher (via launch.py)"
+echo " Job ID:        ${{SLURM_JOB_ID}}"
+echo " UUID8:         {uuid8}"
+echo " Node:          ${{SLURMD_NODENAME}}"
+echo " GPU:           ${{CUDA_VISIBLE_DEVICES:-unset}}"
+nvidia-smi -L 2>/dev/null | sed 's/^/ GPU detail:   /' || true
+echo " Run dir:       ${{RUN_DIR}}"
+echo " Boltz cache:   ${{BOLTZ_CACHE}}"
+echo " Fake HOME:     ${{FAKE_HOME}}"
+echo " Started:       $(date)"
+echo "================================================================"
+
+module load eth_proxy
+
+apptainer exec \\
+    --nv \\
+    {static_binds} \\
+    --bind "${{TMPDIR}}:${{TMPDIR}}" \\
+    --bind "${{BOLTZ_CACHE}}:/cluster/home/${{USER}}" \\
+    --env HOME="${{FAKE_HOME}}" \\
+    --env MPLCONFIGDIR="${{MPLCONFIGDIR}}" \\
+    "${{SIF}}" \\
+    bash -c "
+set -euo pipefail
+cp -r /app/LigandMPNN '${{RUN_DIR}}/LigandMPNN'
+cd /app
+python boltzdesign.py {cli_args_str} --gpu_id 0 --work_dir '${{RUN_DIR}}'
+"
+
+EXIT_CODE=$?
+
+if [ "${{EXIT_CODE}}" -eq 0 ]; then
+    echo "=== BD1 inference finished, running postprocess: $(date) ==="
+    bash /cluster/work/wicky/lvalsecchi/rna_binder/code/scripts/stages/postprocess_boltzdesign.sh \
+        "${{RUN_DIR}}" || echo "WARN: postprocess failed but design exit code preserved"
+fi
+
+echo "================================================================"
+echo " Finished:   $(date)"
+echo " Exit code:  ${{EXIT_CODE}}"
+echo "================================================================"
+exit ${{EXIT_CODE}}
+"""
+
+
+
+
+def build_boltzdesign_multif_sbatch(config, backbone_dir, mpnn_run_dir, uuid8, shared_mpnn_designs=None, log_dir=None):
+    """Build the multif sbatch that calls stages/boltzdesign_multif.sh.
+
+    Two output dirs share the same uuid8:
+      backbone_dir:  _backbones/BD1_len<N>_<uuid8>/
+      mpnn_run_dir:  boltzdesign__ligandmpnn/<label>_<uuid8>/
+
+    Hallucination only (run_ligandmpnn=false, run_alphafold=false in the YAML);
+    external LiMPNN runs on the surviving backbones with mpnn_cli knobs.
+    """
+    slurm = config["slurm"]
+    c = config["container"]
+    gp = config["generator_params"]
+    # Length: BD1 has both length_min and length_max; in the binder design
+    # workflow they're equal, so use length_min as the canonical length.
+    length = int(gp.get("length_min", 80))
+
+    # Separate the BD1 CLI args (scalar gp keys) from the nested mpnn_cli dict.
+    # Anything in generator_params that isn't mpnn_cli becomes --<key> <value>
+    # for boltzdesign.py. This mirrors the existing build_boltzdesign_sbatch.
+    bd1_cli = []
+    for k, v in gp.items():
+        if k == "mpnn_cli" or k == "work_dir":
+            continue
+        bd1_cli.append(f"--{k} {shlex.quote(str(v))}")
+    bd1_cli_args = " ".join(bd1_cli)
+
+    mpnn_flags = " ".join(
+        f"--{k} {shlex.quote(str(v))}" for k, v in gp.get("mpnn_cli", {}).items()
+    )
+
+    # BD1 container bind list (static binds from the YAML; TMPDIR + BOLTZ_CACHE
+    # binds are added by the stage script per-job).
+    bd1_bind_flags = " ".join(f"--bind {b}" for b in c.get("binds", []))
+
+    worker = (
+        "/cluster/work/wicky/lvalsecchi/rna_binder/code/scripts/stages/"
+        "boltzdesign_multif.sh"
+    )
+
+    shared_mpnn_str = str(shared_mpnn_designs) if shared_mpnn_designs else str(mpnn_run_dir / "designs")
+
+    return f"""#!/bin/bash
+#SBATCH --job-name={slurm.get('job_name', 'bd1_multif')}_{uuid8}
+#SBATCH --requeue
+#SBATCH --open-mode=append
+#SBATCH --partition={slurm['partition']}
+#SBATCH --time={slurm['time']}
+#SBATCH --cpus-per-task={slurm['cpus_per_task']}
+#SBATCH --mem-per-cpu={slurm['mem_per_cpu']}
+#SBATCH --gpus={slurm['gpus']}
+{('#SBATCH --nodelist=' + slurm['nodelist']) if slurm.get('nodelist') else ''}
+{('#SBATCH --gres=' + slurm['gres']) if slurm.get('gres') else ''}
+#SBATCH --tmp={slurm['tmp']}
+#SBATCH --output={log_dir or mpnn_run_dir}/slurm_{uuid8}.log
+#SBATCH --error={log_dir or mpnn_run_dir}/slurm_{uuid8}.err
+
+set -euo pipefail
+
+module load eth_proxy
+
+export BD1_SIF={c['bd1_sif']}
+export BD1_BIND_FLAGS="{bd1_bind_flags}"
+export BD1_CLI_ARGS="{bd1_cli_args}"
+export BD1_TARGET_TYPE={gp['target_type']}
+export BD1_TARGET_NAME={gp['target_name']}
+export BD1_SUFFIX={gp['suffix']}
+export BOLTZ_CACHE={c['boltz_cache']}
+export MPNN_SIF={c['ligandmpnn_sif']}
+export MPNN_WEIGHTS={c['ligandmpnn_weights']}
+export MPNN_FLAGS="{mpnn_flags}"
+
+bash {worker} \
+    {backbone_dir} \
+    {mpnn_run_dir} \
+    {uuid8} \
+    {length} \
+    {shared_mpnn_str}
+"""
+
+
+def build_rfd3_multif_sbatch(config, backbone_dir, mpnn_run_dir, uuid8, shared_mpnn_designs=None, log_dir=None):
+    """Build the multif sbatch that calls stages/rfd3_multif.sh.
+
+    Two output dirs share the same uuid8:
+      backbone_dir:  _backbones/RFD3_len<N>_<uuid8>/
+      mpnn_run_dir:  rfd3__ligandmpnn/<label>_<uuid8>/
+
+    Reuses the LiMPNN container from BG multif so mpnn_cli semantics match
+    across stacks. The bundled-LiMPNN sequence inside RFD3's .cif.gz output
+    is discarded; only the backbone coords are kept.
+    """
+    slurm = config["slurm"]
+    c = config["container"]
+    gp = config["generator_params"]
+    # Length is currently sourced from the RFD3 input JSON; we hardcode 80 for
+    # csy4 since RFD3's config doesn't surface it. Update if you retarget.
+    length = gp.get("length", 80)
+
+    mpnn_flags = " ".join(
+        f"--{k} {shlex.quote(str(v))}" for k, v in gp.get("mpnn_cli", {}).items()
+    )
+
+    worker = (
+        "/cluster/work/wicky/lvalsecchi/rna_binder/code/scripts/stages/"
+        "rfd3_multif.sh"
+    )
+
+    shared_mpnn_str = str(shared_mpnn_designs) if shared_mpnn_designs else str(mpnn_run_dir / "designs")
+
+    return f"""#!/bin/bash
+#SBATCH --job-name={slurm.get('job_name', 'rfd3_multif')}_{uuid8}
+#SBATCH --requeue
+#SBATCH --open-mode=append
+#SBATCH --partition={slurm['partition']}
+#SBATCH --time={slurm['time']}
+#SBATCH --cpus-per-task={slurm['cpus_per_task']}
+#SBATCH --mem-per-cpu={slurm['mem_per_cpu']}
+#SBATCH --gpus={slurm['gpus']}
+{('#SBATCH --nodelist=' + slurm['nodelist']) if slurm.get('nodelist') else ''}
+{('#SBATCH --gres=' + slurm['gres']) if slurm.get('gres') else ''}
+#SBATCH --output={log_dir or mpnn_run_dir}/slurm_{uuid8}.log
+#SBATCH --error={log_dir or mpnn_run_dir}/slurm_{uuid8}.err
+
+set -euo pipefail
+
+export RFD3_SIF={c['rfd3_sif']}
+export RFD3_ACTIVATE={c['activate_script']}
+export RFD3_CWD={gp['cwd']}
+export RFD3_INPUTS={gp['inputs']}
+export RFD3_N_BATCHES={gp.get('n_batches', 1)}
+export RFD3_DIFFUSION_BATCH_SIZE={gp.get('diffusion_batch_size', 8)}
+export RFD3_PREVALIDATE={str(gp.get('prevalidate_inputs', True)).lower()}
+export RFD3_SKIP_EXISTING={str(gp.get('skip_existing', False)).lower()}
+export MPNN_SIF={c['ligandmpnn_sif']}
+export MPNN_WEIGHTS={c['ligandmpnn_weights']}
+export MPNN_FLAGS="{mpnn_flags}"
+
+bash {worker} \
+    {backbone_dir} \
+    {mpnn_run_dir} \
+    {uuid8} \
+    {length} \
+    {shared_mpnn_str}
+"""
+
+
+def build_boltzgen_multif_sbatch(config, backbone_dir, bif_run_dir, mpnn_run_dir, uuid8, shared_bif_designs=None, shared_mpnn_designs=None, log_dir=None):
+    """Build the multif sbatch that calls stages/boltzgen_multif.sh.
+
+    Three output dirs share the same uuid8:
+      backbone_dir:  _backbones/BG_len<N>_<uuid8>/
+      bif_run_dir:   boltzgen__boltzif/<label>_<uuid8>/
+      mpnn_run_dir:  boltzgen__ligandmpnn/<label>_<uuid8>/
+    """
+    slurm = config["slurm"]
+    c = config["container"]
+    gp = config["generator_params"]
+    length = gp["spec"]["entities"][0]["protein"]["sequence"]
+
+    bg_envs_str = " ".join(f"--env {k}={v}" for k, v in c.get("boltzgen_envs", {}).items())
+
+    bg_flags = " ".join(f"--{k} {v}" for k, v in gp.get("bg_cli", {}).items())
+    bif_flags = " ".join(f"--{k} {v}" for k, v in gp.get("bif_cli", {}).items())
+    mpnn_flags = " ".join(
+        f"--{k} {shlex.quote(str(v))}" for k, v in gp.get("mpnn_cli", {}).items()
+    )
+
+    spec_yaml = yaml.dump(gp["spec"], default_flow_style=False)
+    target_rna_pdb = (
+        "/cluster/work/wicky/lvalsecchi/rna_binder/targets/"
+        + config["target_id"] + "/csy4_rna_only.pdb"
+    )
+
+    worker = (
+        "/cluster/work/wicky/lvalsecchi/rna_binder/code/scripts/stages/"
+        "boltzgen_multif.sh"
+    )
+
+    # Shared designs dirs for --num-runs > 1 (empty string = use default)
+    shared_bif_str = str(shared_bif_designs) if shared_bif_designs else str(bif_run_dir / "designs")
+    shared_mpnn_str = str(shared_mpnn_designs) if shared_mpnn_designs else str(mpnn_run_dir / "designs")
+
+    return f"""#!/bin/bash
+#SBATCH --job-name={slurm.get('job_name', 'bg_multif')}_{uuid8}
+#SBATCH --requeue
+#SBATCH --open-mode=append
+#SBATCH --partition={slurm['partition']}
+#SBATCH --time={slurm['time']}
+#SBATCH --cpus-per-task={slurm['cpus_per_task']}
+#SBATCH --mem-per-cpu={slurm['mem_per_cpu']}
+#SBATCH --gpus={slurm['gpus']}
+{('#SBATCH --nodelist=' + slurm['nodelist']) if slurm.get('nodelist') else ''}
+{('#SBATCH --gres=' + slurm['gres']) if slurm.get('gres') else ''}
+#SBATCH --output={log_dir or bif_run_dir}/slurm_{uuid8}.log
+#SBATCH --error={log_dir or bif_run_dir}/slurm_{uuid8}.err
+
+set -euo pipefail
+
+export BG_SIF={c['boltzgen_sif']}
+export BG_HOME={c['boltzgen_home']}
+export BG_BG_ENVS="{bg_envs_str}"
+export MPNN_SIF={c['ligandmpnn_sif']}
+export MPNN_WEIGHTS={c['ligandmpnn_weights']}
+export BG_FLAGS="{bg_flags}"
+export BIF_FLAGS="{bif_flags}"
+export MPNN_FLAGS="{mpnn_flags}"
+export TARGET_RNA_PDB={target_rna_pdb}
+export SPEC_YAML_CONTENT='{spec_yaml}'
+
+bash {worker} \
+    {backbone_dir} \
+    {bif_run_dir} \
+    {mpnn_run_dir} \
+    {uuid8} \
+    {length} \
+    {shared_bif_str} \
+    {shared_mpnn_str}
+"""
+
+
+
+def build_refold_af3_sbatch(config, refold_dir, source_run, designs_filter=""):
+    """Build sbatch that calls stages/refold_af3.sh worker.
+
+    refold_dir = <source_run>/refold_af3/<label>/
+    """
+    slurm = config["slurm"]
+    c = config["container"]
+    rp = config.get("refolder_params", {})
+    rna_seq = config["rna_sequence"]
+    model_seeds = rp.get("model_seeds", [1])
+    model_seeds_json = json.dumps(model_seeds)
+    num_diffusion_samples = rp.get("num_diffusion_samples", 1)
+    rna_msa_path = rp.get("rna_msa_path", "") if rp.get("use_rna_msa", False) else ""
+
+    worker = (
+        "/cluster/work/wicky/lvalsecchi/rna_binder/code/scripts/stages/"
+        "refold_af3.sh"
+    )
+
+    return f"""#!/bin/bash
+#SBATCH --job-name={slurm.get('job_name', 'refold_af3')}
+#SBATCH --requeue
+#SBATCH --open-mode=append
+#SBATCH --partition={slurm['partition']}
+#SBATCH --time={slurm['time']}
+#SBATCH --cpus-per-task={slurm['cpus_per_task']}
+#SBATCH --mem-per-cpu={slurm['mem_per_cpu']}
+#SBATCH --gpus={slurm['gpus']}
+{('#SBATCH --gres=' + slurm['gres']) if slurm.get('gres') else ''}
+{('#SBATCH --nodelist=' + slurm['nodelist']) if slurm.get('nodelist') else ''}
+#SBATCH --output={refold_dir}/slurm.log
+#SBATCH --error={refold_dir}/slurm.err
+
+set -euo pipefail
+
+export AF3_SIF={c['sif']}
+export AF3_PARAMS={c['params_dir']}
+export MODEL_SEEDS_JSON='{model_seeds_json}'
+export AF3_NUM_DIFFUSION_SAMPLES={num_diffusion_samples}
+export RNA_MSA_PATH="{rna_msa_path}"
+
+bash {worker} \
+    {refold_dir} \
+    {source_run} \
+    {rna_seq} \
+    "{designs_filter}"
+"""
+
+
+
+def build_refold_b2_sbatch(config, refold_dir, source_run, designs_filter=""):
+    """Build sbatch that calls stages/refold_b2.sh worker.
+
+    refold_dir = <source_run>/refold_b2/<label>/
+    """
+    slurm = config["slurm"]
+    c = config["container"]
+    rp = config.get("refolder_params", {})
+    rna_seq = config["rna_sequence"]
+    diffusion_samples = rp.get("diffusion_samples", 5)
+    output_format = rp.get("output_format", "mmcif")
+    write_full_pae = "true" if rp.get("write_full_pae", True) else "false"
+    rna_msa_path = rp.get("rna_msa_path", "") if rp.get("use_rna_msa", False) else ""
+    rna_template_path = rp.get("rna_template_path", "") if rp.get("use_rna_template", False) else ""
+    rna_template_chain = rp.get("rna_template_chain", "B")
+
+    worker = (
+        "/cluster/work/wicky/lvalsecchi/rna_binder/code/scripts/stages/"
+        "refold_b2.sh"
+    )
+
+    return f"""#!/bin/bash
+#SBATCH --job-name={slurm.get('job_name', 'refold_b2')}
+#SBATCH --requeue
+#SBATCH --open-mode=append
+#SBATCH --partition={slurm['partition']}
+#SBATCH --time={slurm['time']}
+#SBATCH --nodes={slurm.get('nodes', 1)}
+#SBATCH --ntasks-per-node={slurm.get('ntasks_per_node', 4)}
+#SBATCH --mem-per-cpu={slurm['mem_per_cpu']}
+#SBATCH --gpus={slurm['gpus']}
+{('#SBATCH --gres=' + slurm['gres']) if slurm.get('gres') else ''}
+{('#SBATCH --nodelist=' + slurm['nodelist']) if slurm.get('nodelist') else ''}
+#SBATCH --output={refold_dir}/slurm.log
+#SBATCH --error={refold_dir}/slurm.err
+
+set -euo pipefail
+
+export B2_SIF={c['sif']}
+export BOLTZ_CACHE={c['cache_dir']}
+export B2_DIFFUSION_SAMPLES={diffusion_samples}
+export B2_OUTPUT_FORMAT={output_format}
+export B2_WRITE_FULL_PAE={write_full_pae}
+export RNA_MSA_PATH="{rna_msa_path}"
+export RNA_TEMPLATE_PATH="{rna_template_path}"
+export RNA_TEMPLATE_CHAIN="{rna_template_chain}"
+
+bash {worker} \
+    {refold_dir} \
+    {source_run} \
+    {rna_seq} \
+    "{designs_filter}"
+"""
+
+def build_refold_esm_sbatch(config, refold_dir, source_run, designs_filter=""):
+    """Build sbatch that calls stages/refold_esm.sh worker (local ESMFold2).
+
+    refold_dir = <source_run>/refold_esm/<label>/
+    """
+    slurm = config["slurm"]
+    c = config["container"]
+    rp = config.get("refolder_params", {})
+    rna_seq = config["rna_sequence"]
+    num_loops = rp.get("num_loops", 20)
+    num_sampling_steps = rp.get("num_sampling_steps", 100)
+    num_diffusion_samples = rp.get("num_diffusion_samples", 1)
+    seed = rp.get("seed", 0)
+
+    worker = (
+        "/cluster/work/wicky/lvalsecchi/rna_binder/code/scripts/stages/"
+        "refold_esm.sh"
+    )
+
+    return f"""#!/bin/bash
+#SBATCH --job-name={slurm.get('job_name', 'refold_esm')}
+#SBATCH --requeue
+#SBATCH --open-mode=append
+#SBATCH --partition={slurm['partition']}
+#SBATCH --time={slurm['time']}
+#SBATCH --cpus-per-task={slurm['cpus_per_task']}
+#SBATCH --mem-per-cpu={slurm['mem_per_cpu']}
+#SBATCH --gpus={slurm['gpus']}
+{('#SBATCH --gres=' + slurm['gres']) if slurm.get('gres') else ''}
+{('#SBATCH --nodelist=' + slurm['nodelist']) if slurm.get('nodelist') else ''}
+#SBATCH --output={refold_dir}/slurm.log
+#SBATCH --error={refold_dir}/slurm.err
+
+set -euo pipefail
+
+export ESM_SIF={c['sif']}
+export ESM_HF_CACHE={c['hf_cache']}
+export ESM_NUM_LOOPS={num_loops}
+export ESM_NUM_SAMPLING_STEPS={num_sampling_steps}
+export ESM_NUM_DIFFUSION_SAMPLES={num_diffusion_samples}
+export ESM_SEED={seed}
+
+bash {worker} \
+    {refold_dir} \
+    {source_run} \
+    {rna_seq} \
+    "{designs_filter}"
+"""
+
+
+BUILDERS = {
+    "rfd3":         build_rfd3_sbatch,
+    "halludesign":  build_halludesign_sbatch,
+    "boltzgen":     build_boltzgen_sbatch,
+    "boltzdesign":  build_boltzdesign_sbatch,
+}
+
+
+# --- main ----------------------------------------------------------------
+
+def _build_refold_jobs(source_run_dirs, label, design_jobid, refold_overrides=None,
+                       designs_filter="", leaf_suffix=""):
+    """Yield (refold_name, refold_dir, refold_cfg, sbatch_str) per dependent refold.
+
+    refold_overrides: optional {"af3": {...}, "b2": {...}} of parsed overrides
+    deep-merged into the respective refold config. design_jobid is interpolated
+    into the afterok dependency line (pass a placeholder for a dry-run preview).
+    """
+    refold_overrides = refold_overrides or {}
+    refold_configs = {
+        "af3": Path("/cluster/work/wicky/lvalsecchi/rna_binder/code/configs/refold__af3/default.yaml"),
+        "b2":  Path("/cluster/work/wicky/lvalsecchi/rna_binder/code/configs/refold__b2/default.yaml"),
+        "esm": Path("/cluster/work/wicky/lvalsecchi/rna_binder/code/configs/refold__esm/default.yaml"),
+    }
+    for source_run in source_run_dirs:
+        for refold_name, refold_cfg_path in refold_configs.items():
+            refold_cfg = yaml.safe_load(refold_cfg_path.read_text())
+            refold_cfg = deep_merge(refold_cfg, refold_overrides.get(refold_name, {}))
+            refold_cfg["source_run"] = str(source_run)
+            kind = refold_cfg["config_kind"]
+            if kind == "refold_af3":
+                builder = build_refold_af3_sbatch
+            elif kind == "refold_b2":
+                builder = build_refold_b2_sbatch
+            elif kind == "refold_esm":
+                builder = build_refold_esm_sbatch
+            else:
+                print(f"  skip: unknown refold kind {kind}")
+                continue
+            # Derive dir name from MSA setting, not run label
+            if kind in ("refold_b2", "refold_esm"):
+                refold_label = "msaoff"  # B2 / ESMFold2 single-sequence: no MSA mode
+            else:
+                use_msa = refold_cfg.get("refolder_params", {}).get("use_rna_msa", False)
+                refold_label = "msaon" if use_msa else "msaoff"
+            # For AF3, always run both msaon and msaoff
+            msa_variants = [False] if kind == "refold_af3" else [None]  # msaon disabled by default (user 2026-06-18); was [False, True]
+            for msa_override in msa_variants:
+                if msa_override is not None:
+                    refold_cfg = yaml.safe_load(refold_cfg_path.read_text())
+                    refold_cfg = deep_merge(refold_cfg, refold_overrides.get(refold_name, {}))
+                    refold_cfg["source_run"] = str(source_run)
+                    if "refolder_params" not in refold_cfg:
+                        refold_cfg["refolder_params"] = {}
+                    refold_cfg["refolder_params"]["use_rna_msa"] = msa_override
+                    refold_label = "msaon" if msa_override else "msaoff"
+                refold_dir = source_run / f"refold_{refold_name}" / f"{refold_label}{leaf_suffix}"
+                sbatch_str = builder(refold_cfg, refold_dir, source_run, designs_filter=designs_filter)
+                dep_line = f"#SBATCH --dependency=afterok:{design_jobid}"
+                sbatch_str = sbatch_str.replace(
+                    "set -euo pipefail",
+                    f"{dep_line}\nset -euo pipefail",
+                    1,
+                )
+                yield refold_name, refold_dir, refold_cfg, sbatch_str
+
+
+def _submit_dependent_refolds(design_jobid, source_run_dirs, label, refold_overrides=None,
+                              designs_filter="", leaf_suffix=""):
+    """Submit AF3 + B2 refold jobs that depend on design_jobid completing."""
+    refold_jobids = []
+    for refold_name, refold_dir, refold_cfg, sbatch_str in _build_refold_jobs(
+            source_run_dirs, label, design_jobid, refold_overrides,
+            designs_filter=designs_filter, leaf_suffix=leaf_suffix):
+        refold_dir.mkdir(parents=True, exist_ok=False)
+        (refold_dir / "resolved_config.yaml").write_text(yaml.dump(refold_cfg))
+        sbatch_path = refold_dir / "run.sbatch"
+        sbatch_path.write_text(sbatch_str)
+        sbatch_path.chmod(0o755)
+        res = subprocess.run(
+            ["sbatch", str(sbatch_path)],
+            capture_output=True, text=True, check=True,
+        )
+        m = re.search(r"(\d+)", res.stdout)
+        jobid = m.group(1) if m else "unknown"
+        print(f"  dep refold {refold_name.upper()}: jobid={jobid} -> {refold_dir}")
+        refold_jobids.append(jobid)
+    return refold_jobids
+
+
+def _preview_dependent_refolds(source_run_dirs, label, refold_overrides=None,
+                               designs_filter="", leaf_suffix=""):
+    """Print the refold sbatch scripts --auto-refold would submit (dry-run)."""
+    for refold_name, refold_dir, _cfg, sbatch_str in _build_refold_jobs(
+            source_run_dirs, label, "<DESIGN_JOBID>", refold_overrides,
+            designs_filter=designs_filter, leaf_suffix=leaf_suffix):
+        print(f"# --- dependent refold {refold_name.upper()}: would create {refold_dir} ---")
+        print(sbatch_str)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Launch a campaign run from a config YAML.")
+    ap.add_argument("config_yaml", type=Path)
+    ap.add_argument("--label", default="run", help="Run dir prefix (default: 'run')")
+    ap.add_argument("--override", action="append", default=[],
+                    help="Override YAML field, e.g. --override slurm.gpus=a100_80gb:1")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Print sbatch but don't submit")
+    ap.add_argument("--auto-refold", action="store_true",
+                    help="After design submission, auto-queue AF3+B2 refold jobs "
+                         "with --dependency=afterok on the design jobid")
+    ap.add_argument("--refold-af3-override", action="append", default=[], metavar="KEY=VAL",
+                    help="Override applied to the AF3 refold config (only with --auto-refold), "
+                         "e.g. --refold-af3-override slurm.time=02:00:00")
+    ap.add_argument("--refold-b2-override", action="append", default=[], metavar="KEY=VAL",
+                    help="Override applied to the B2 refold config (only with --auto-refold), "
+                         "e.g. --refold-b2-override refolder_params.diffusion_samples=10")
+    ap.add_argument("--refold-esm-override", action="append", default=[], metavar="KEY=VAL",
+                    help="Override applied to the ESMFold2 refold config (only with --auto-refold), "
+                         "e.g. --refold-esm-override refolder_params.num_sampling_steps=50")
+    ap.add_argument("--num-runs", type=int, default=1, metavar="N",
+                    help="Submit N independent runs in parallel, each with a unique uuid8 "
+                         "and its own auto-refold chain (default: 1)")
+    args = ap.parse_args()
+
+    # Load config + apply overrides
+    with open(args.config_yaml) as f:
+        config = yaml.safe_load(f)
+    overrides = parse_overrides(args.override)
+    config = deep_merge(config, overrides)
+
+    # Refold overrides are kept separate; they merge into the refold configs,
+    # not the design config, inside _submit_dependent_refolds.
+    refold_overrides = {
+        "af3": parse_overrides(args.refold_af3_override),
+        "b2":  parse_overrides(args.refold_b2_override),
+        "esm": parse_overrides(args.refold_esm_override),
+    }
+
+    # ----- Meta-config handling (config_kind: multif) -----
+    if config.get("config_kind") == "multif":
+        gen = config["generator"]
+        invs = set(config.get("inverse_folders", []))
+        # Three multif shapes supported:
+        #   boltzgen     + [boltzif, ligandmpnn] -- 3 dirs (backbone + 2 stacks)
+        #   rfd3         + [ligandmpnn]          -- 2 dirs (backbone + 1 stack)
+        #   boltzdesign  + [ligandmpnn]          -- 2 dirs (backbone + 1 stack)
+        if not (
+            (gen == "boltzgen" and invs == {"boltzif", "ligandmpnn"})
+            or (gen == "rfd3" and invs == {"ligandmpnn"})
+            or (gen == "boltzdesign" and invs == {"ligandmpnn"})
+        ):
+            sys.exit(
+                "Unsupported multif config: only boltzgen + [boltzif, ligandmpnn], "
+                "rfd3 + [ligandmpnn], or boltzdesign + [ligandmpnn] are wired up."
+            )
+
+        # Single-inverse-folder multif (rfd3 / boltzdesign): same shape — one
+        # backbone dir + one stack dir per uuid. Differ only in name prefix,
+        # length source, stack key, and builder function.
+        if gen in {"rfd3", "boltzdesign"}:
+            if gen == "rfd3":
+                backbone_prefix = "RFD3"
+                stack_key = "rfd3__ligandmpnn"
+                length_getter = lambda gp: gp.get("length", 80)
+                builder = build_rfd3_multif_sbatch
+                pretty_name = "RFD3"
+            else:  # boltzdesign
+                backbone_prefix = "BD1"
+                stack_key = "boltzdesign__ligandmpnn"
+                length_getter = lambda gp: int(gp.get("length_min", 80))
+                builder = build_boltzdesign_multif_sbatch
+                pretty_name = "BD1"
+
+            # For --num-runs>1 the N jobs share one designs/ dir, so refolds must
+            # target that shared dir and wait on ALL N design jobs. Collect jobids
+            # and submit one refold set after the loop (not per-run).
+            jobids = []
+            shared_run_dir = (CAMPAIGNS_DIR / config["target_id"] / stack_key / args.label
+                              if args.num_runs > 1 else None)
+
+            for _run_i in range(args.num_runs):
+                if args.num_runs > 1:
+                    print(f"\n=== {pretty_name} multif run {_run_i+1}/{args.num_runs} ===")
+                uuid8 = gen_uuid8()
+                target = config["target_id"]
+                length = length_getter(config["generator_params"])
+
+                backbone_dir = CAMPAIGNS_DIR / target / "_backbones" / f"{backbone_prefix}_len{length}_{uuid8}"
+                mpnn_run_dir = CAMPAIGNS_DIR / target / stack_key / f"{args.label}_{uuid8}"
+
+                while backbone_dir.exists() or mpnn_run_dir.exists():
+                    uuid8 = gen_uuid8()
+                    backbone_dir = CAMPAIGNS_DIR / target / "_backbones" / f"{backbone_prefix}_len{length}_{uuid8}"
+                    mpnn_run_dir = CAMPAIGNS_DIR / target / stack_key / f"{args.label}_{uuid8}"
+
+                if args.num_runs > 1:
+                    shared_mpnn_designs = CAMPAIGNS_DIR / target / stack_key / args.label / "designs"
+                    shared_mpnn_designs.mkdir(parents=True, exist_ok=True)
+                else:
+                    shared_mpnn_designs = None
+                log_dir = shared_mpnn_designs.parent if args.num_runs > 1 else None
+                sbatch_str = builder(
+                    config, backbone_dir, mpnn_run_dir, uuid8,
+                    shared_mpnn_designs=shared_mpnn_designs,
+                    log_dir=log_dir,
+                )
+
+                if args.dry_run:
+                    print(f"# Would create: {backbone_dir}")
+                    print(f"#               {mpnn_run_dir}")
+                    print(f"# UUID8: {uuid8}")
+                    print("# --- sbatch script: ---")
+                    print(sbatch_str)
+                    if args.auto_refold:
+                        print("# --- would also queue dependent refolds: ---")
+                        if args.num_runs > 1:
+                            _preview_dependent_refolds([shared_run_dir], args.label,
+                                                       refold_overrides,
+                                                       designs_filter=uuid8,
+                                                       leaf_suffix=f"_{uuid8}")
+                        else:
+                            _preview_dependent_refolds([mpnn_run_dir], args.label,
+                                                       refold_overrides)
+                    continue
+
+                if args.num_runs > 1:
+                    sbatch_dir = shared_mpnn_designs.parent / f"run_{uuid8}"
+                    sbatch_dir.mkdir(parents=True, exist_ok=True)
+                    dirs_to_create = [backbone_dir]
+                else:
+                    sbatch_dir = mpnn_run_dir
+                    dirs_to_create = [backbone_dir, mpnn_run_dir]
+
+                for d in dirs_to_create:
+                    d.mkdir(parents=True, exist_ok=False)
+
+                config_str = yaml.dump(config, default_flow_style=False)
+                (sbatch_dir / "resolved_config.yaml").write_text(config_str)
+                sbatch_path = sbatch_dir / "run.sbatch"
+                sbatch_path.write_text(sbatch_str)
+                sbatch_path.chmod(0o755)
+
+                result = subprocess.run(
+                    ["sbatch", str(sbatch_path)],
+                    capture_output=True, text=True, check=True,
+                )
+                jobid_match = re.search(r"(\d+)", result.stdout)
+                jobid = jobid_match.group(1) if jobid_match else "unknown"
+
+                base_meta = {
+                    "uuid8": uuid8,
+                    "jobid": jobid,
+                    "label": args.label,
+                    "submitted": datetime.now().isoformat(),
+                    "host": os.uname().nodename,
+                    "user": os.environ.get("USER", "unknown"),
+                    "config_kind": "multif",
+                    "generator": gen,
+                    "target": target,
+                    "config_path": str(args.config_yaml.resolve()),
+                    "overrides": overrides,
+                    "backbone_set": str(backbone_dir),
+                    "stack": stack_key,
+                }
+                mpnn_out = shared_mpnn_designs.parent if args.num_runs > 1 else mpnn_run_dir
+                (mpnn_out / f"run_meta_{uuid8}.json").write_text(json.dumps(base_meta, indent=2))
+
+                print(f"Submitted {pretty_name} multif: jobid={jobid}, uuid8={uuid8}")
+                print(f"Backbone:   {backbone_dir}")
+                print(f"LiMPNN:     {mpnn_run_dir}")
+
+                if args.auto_refold:
+                    if args.num_runs > 1:
+                        # Per-uuid refold: refold only this run's _<uuid8>_ designs from the
+                        # shared pool, afterok on its OWN job, so one dead run no longer
+                        # cancels the whole batch's refold.
+                        print(f"--- Queuing per-run refolds dependent on jobid={jobid} ---")
+                        _submit_dependent_refolds(jobid, [shared_run_dir], args.label,
+                                                  refold_overrides,
+                                                  designs_filter=uuid8, leaf_suffix=f"_{uuid8}")
+                    else:
+                        print(f"--- Queuing refolds dependent on jobid={jobid} ---")
+                        _submit_dependent_refolds(jobid, [mpnn_run_dir], args.label,
+                                                  refold_overrides)
+                continue
+
+            if args.auto_refold and args.num_runs > 1 and jobids:
+                dep = ":".join(jobids)
+                print(f"--- Queuing refolds on shared designs, dependent on all "
+                      f"{len(jobids)} jobs ({dep}) ---")
+                _submit_dependent_refolds(dep, [shared_run_dir], args.label,
+                                          refold_overrides)
+            return  # all num_runs submitted for single-IF multif
+
+        # See single-IF note above: for --num-runs>1 the BIF + LiMPNN designs each
+        # aggregate in one shared dir, so refolds target both shared dirs and wait
+        # on ALL N jobs, submitted once after the loop.
+        bg_jobids = []
+        bg_shared_runs = (
+            [CAMPAIGNS_DIR / config["target_id"] / "boltzgen__boltzif" / args.label,
+             CAMPAIGNS_DIR / config["target_id"] / "boltzgen__ligandmpnn" / args.label]
+            if args.num_runs > 1 else None)
+        for _run_i in range(args.num_runs):
+            if args.num_runs > 1:
+                print(f"\n=== Multif run {_run_i+1}/{args.num_runs} ===")
+            uuid8 = gen_uuid8()
+            target = config["target_id"]
+            length = config["generator_params"]["spec"]["entities"][0]["protein"]["sequence"]
+
+            backbone_dir = CAMPAIGNS_DIR / target / "_backbones" / f"BG_len{length}_{uuid8}"
+            bif_run_dir = CAMPAIGNS_DIR / target / "boltzgen__boltzif" / f"{args.label}_{uuid8}"
+            mpnn_run_dir = CAMPAIGNS_DIR / target / "boltzgen__ligandmpnn" / f"{args.label}_{uuid8}"
+
+            # Collision check (regenerate uuid if any of the 3 exists)
+            while backbone_dir.exists() or bif_run_dir.exists() or mpnn_run_dir.exists():
+                uuid8 = gen_uuid8()
+                backbone_dir = CAMPAIGNS_DIR / target / "_backbones" / f"BG_len{length}_{uuid8}"
+                bif_run_dir = CAMPAIGNS_DIR / target / "boltzgen__boltzif" / f"{args.label}_{uuid8}"
+                mpnn_run_dir = CAMPAIGNS_DIR / target / "boltzgen__ligandmpnn" / f"{args.label}_{uuid8}"
+
+            # Shared designs dirs when num_runs > 1
+            if args.num_runs > 1:
+                shared_bif_designs = CAMPAIGNS_DIR / target / "boltzgen__boltzif" / args.label / "designs"
+                shared_mpnn_designs = CAMPAIGNS_DIR / target / "boltzgen__ligandmpnn" / args.label / "designs"
+                shared_bif_designs.mkdir(parents=True, exist_ok=True)
+                shared_mpnn_designs.mkdir(parents=True, exist_ok=True)
+            else:
+                shared_bif_designs = None
+                shared_mpnn_designs = None
+            log_dir = shared_bif_designs.parent if args.num_runs > 1 else None
+            sbatch_str = build_boltzgen_multif_sbatch(
+                config, backbone_dir, bif_run_dir, mpnn_run_dir, uuid8,
+                shared_bif_designs=shared_bif_designs,
+                shared_mpnn_designs=shared_mpnn_designs,
+                log_dir=log_dir,
+            )
+
+            if args.dry_run:
+                print(f"# Would create: {backbone_dir}")
+                print(f"#               {bif_run_dir}")
+                print(f"#               {mpnn_run_dir}")
+                print(f"# UUID8: {uuid8}")
+                print("# --- sbatch script: ---")
+                print(sbatch_str)
+                if args.auto_refold:
+                    print("# --- would also queue dependent refolds: ---")
+                    if args.num_runs > 1:
+                        _preview_dependent_refolds(bg_shared_runs, args.label,
+                                                   refold_overrides,
+                                                   designs_filter=uuid8,
+                                                   leaf_suffix=f"_{uuid8}")
+                    else:
+                        _preview_dependent_refolds([bif_run_dir, mpnn_run_dir], args.label,
+                                                   refold_overrides)
+                continue
+
+            # When num_runs > 1, write sbatch/logs/configs to shared dir
+            # When num_runs == 1, use per-run dirs as before
+            if args.num_runs > 1:
+                bif_log_dir = shared_bif_designs.parent
+                mpnn_log_dir = shared_mpnn_designs.parent
+                sbatch_dir = bif_log_dir / f"run_{uuid8}"
+                sbatch_dir.mkdir(parents=True, exist_ok=True)
+                dirs_to_create = [backbone_dir]
+            else:
+                bif_log_dir = bif_run_dir
+                mpnn_log_dir = mpnn_run_dir
+                sbatch_dir = bif_run_dir
+                dirs_to_create = [backbone_dir, bif_run_dir, mpnn_run_dir]
+
+            for d in dirs_to_create:
+                d.mkdir(parents=True, exist_ok=False)
+
+            # Write the config + sbatch
+            config_str = yaml.dump(config, default_flow_style=False)
+            (sbatch_dir / "resolved_config.yaml").write_text(config_str)
+            sbatch_path = sbatch_dir / "run.sbatch"
+            sbatch_path.write_text(sbatch_str)
+            sbatch_path.chmod(0o755)
+
+            # Submit
+            result = subprocess.run(
+                ["sbatch", str(sbatch_path)],
+                capture_output=True, text=True, check=True,
+            )
+            jobid_match = re.search(r"(\d+)", result.stdout)
+            jobid = jobid_match.group(1) if jobid_match else "unknown"
+
+            # Cross-referenced run_meta.json in both stack dirs
+            base_meta = {
+                "uuid8": uuid8,
+                "jobid": jobid,
+                "label": args.label,
+                "submitted": datetime.now().isoformat(),
+                "host": os.uname().nodename,
+                "user": os.environ.get("USER", "unknown"),
+                "config_kind": "multif",
+                "generator": "boltzgen",
+                "target": target,
+                "config_path": str(args.config_yaml.resolve()),
+                "overrides": overrides,
+                "backbone_set": str(backbone_dir),
+            }
+            meta_bif = dict(base_meta, stack="boltzgen__boltzif", sibling_stack=str(mpnn_run_dir))
+            meta_mpnn = dict(base_meta, stack="boltzgen__ligandmpnn", sibling_stack=str(bif_run_dir))
+            bif_out = shared_bif_designs.parent if args.num_runs > 1 else bif_run_dir
+            mpnn_out = shared_mpnn_designs.parent if args.num_runs > 1 else mpnn_run_dir
+            (bif_out / f"run_meta_{uuid8}.json").write_text(json.dumps(meta_bif, indent=2))
+            (mpnn_out / f"run_meta_{uuid8}.json").write_text(json.dumps(meta_mpnn, indent=2))
+
+            print(f"Submitted multif: jobid={jobid}, uuid8={uuid8}")
+            print(f"Backbone:   {backbone_dir}")
+            print(f"BIF:        {bif_run_dir}")
+            print(f"LiMPNN:     {mpnn_run_dir}")
+
+            if args.auto_refold:
+                if args.num_runs > 1:
+                    # Per-uuid refold: refold only this run's _<uuid8>_ designs from each
+                    # shared pool (BIF + LiMPNN), afterok on its OWN job.
+                    print(f"--- Queuing per-run refolds dependent on jobid={jobid} ---")
+                    _submit_dependent_refolds(jobid, bg_shared_runs, args.label,
+                                              refold_overrides,
+                                              designs_filter=uuid8, leaf_suffix=f"_{uuid8}")
+                else:
+                    print(f"--- Queuing refolds dependent on jobid={jobid} ---")
+                    _submit_dependent_refolds(jobid, [bif_run_dir, mpnn_run_dir], args.label,
+                                              refold_overrides)
+
+            continue
+
+        if args.auto_refold and args.num_runs > 1 and bg_jobids:
+            dep = ":".join(bg_jobids)
+            print(f"--- Queuing refolds on shared designs, dependent on all "
+                  f"{len(bg_jobids)} jobs ({dep}) ---")
+            _submit_dependent_refolds(dep, bg_shared_runs, args.label, refold_overrides)
+        return  # all num_runs submitted for multif
+
+    # ----- Refold AF3 meta-config -----
+    if config.get("config_kind") == "refold_af3":
+        # source_run must be provided via --override
+        if "source_run" not in config or config["source_run"] == "REQUIRED":
+            sys.exit(
+                "refold_af3 config requires source_run. Pass it via:\n"
+                "  --override source_run=/cluster/.../path/to/source_run_dir"
+            )
+
+        source_run = Path(config["source_run"])
+        if not source_run.exists():
+            sys.exit(f"source_run does not exist: {source_run}")
+        designs_dir = source_run / "designs"
+        if not designs_dir.exists():
+            sys.exit(f"source_run has no designs/ subdir: {source_run}")
+
+        refold_dir = source_run / "refold_af3" / args.label
+        if refold_dir.exists():
+            sys.exit(
+                f"refold dir already exists: {refold_dir}\n"
+                f"Pick a different --label, or remove the existing dir."
+            )
+
+        sbatch_str = build_refold_af3_sbatch(config, refold_dir, source_run)
+
+        if args.dry_run:
+            print(f"# Would create: {refold_dir}")
+            print(f"# Source designs: {designs_dir}")
+            print(f"# Label: {args.label}")
+            print("# --- sbatch script: ---")
+            print(sbatch_str)
+            return
+
+        refold_dir.mkdir(parents=True, exist_ok=False)
+
+        # Write provenance
+        (refold_dir / "resolved_config.yaml").write_text(
+            yaml.dump(config, default_flow_style=False)
+        )
+        sbatch_path = refold_dir / "run.sbatch"
+        sbatch_path.write_text(sbatch_str)
+        sbatch_path.chmod(0o755)
+
+        result = subprocess.run(
+            ["sbatch", str(sbatch_path)],
+            capture_output=True, text=True, check=True,
+        )
+        jobid_match = re.search(r"(\d+)", result.stdout)
+        jobid = jobid_match.group(1) if jobid_match else "unknown"
+
+        meta = {
+            "jobid": jobid,
+            "label": args.label,
+            "submitted": datetime.now().isoformat(),
+            "host": os.uname().nodename,
+            "user": os.environ.get("USER", "unknown"),
+            "config_kind": "refold_af3",
+            "refolder": "AF3",
+            "target": config["target_id"],
+            "source_run": str(source_run),
+            "config_path": str(args.config_yaml.resolve()),
+            "overrides": overrides,
+        }
+        (refold_dir / "run_meta.json").write_text(json.dumps(meta, indent=2))
+
+        print(f"Submitted AF3 refold: jobid={jobid}")
+        print(f"Source:  {source_run}")
+        print(f"Refold:  {refold_dir}")
+        return
+
+    # ----- Refold B2 meta-config -----
+    if config.get("config_kind") == "refold_b2":
+        if "source_run" not in config or config["source_run"] == "REQUIRED":
+            sys.exit(
+                "refold_b2 config requires source_run. Pass it via:\n"
+                "  --override source_run=/cluster/.../path/to/source_run_dir"
+            )
+
+        source_run = Path(config["source_run"])
+        if not source_run.exists():
+            sys.exit(f"source_run does not exist: {source_run}")
+        designs_dir = source_run / "designs"
+        if not designs_dir.exists():
+            sys.exit(f"source_run has no designs/ subdir: {source_run}")
+
+        refold_dir = source_run / "refold_b2" / args.label
+        if refold_dir.exists():
+            sys.exit(
+                f"refold dir already exists: {refold_dir}\n"
+                f"Pick a different --label, or remove the existing dir."
+            )
+
+        sbatch_str = build_refold_b2_sbatch(config, refold_dir, source_run)
+
+        if args.dry_run:
+            print(f"# Would create: {refold_dir}")
+            print(f"# Source designs: {designs_dir}")
+            print(f"# Label: {args.label}")
+            print("# --- sbatch script: ---")
+            print(sbatch_str)
+            return
+
+        refold_dir.mkdir(parents=True, exist_ok=False)
+
+        (refold_dir / "resolved_config.yaml").write_text(
+            yaml.dump(config, default_flow_style=False)
+        )
+        sbatch_path = refold_dir / "run.sbatch"
+        sbatch_path.write_text(sbatch_str)
+        sbatch_path.chmod(0o755)
+
+        result = subprocess.run(
+            ["sbatch", str(sbatch_path)],
+            capture_output=True, text=True, check=True,
+        )
+        jobid_match = re.search(r"(\d+)", result.stdout)
+        jobid = jobid_match.group(1) if jobid_match else "unknown"
+
+        meta = {
+            "jobid": jobid,
+            "label": args.label,
+            "submitted": datetime.now().isoformat(),
+            "host": os.uname().nodename,
+            "user": os.environ.get("USER", "unknown"),
+            "config_kind": "refold_b2",
+            "refolder": "B2",
+            "target": config["target_id"],
+            "source_run": str(source_run),
+            "config_path": str(args.config_yaml.resolve()),
+            "overrides": overrides,
+        }
+        (refold_dir / "run_meta.json").write_text(json.dumps(meta, indent=2))
+
+        print(f"Submitted B2 refold: jobid={jobid}")
+        print(f"Source:  {source_run}")
+        print(f"Refold:  {refold_dir}")
+        return
+
+    # ----- Normal (non-meta) config handling -----
+    gen = config["generator"]
+    if gen not in BUILDERS:
+        sys.exit(f"No builder for generator '{gen}'. Available: {list(BUILDERS)}")
+
+    for _run_i in range(args.num_runs):
+        if args.num_runs > 1:
+            print(f"\n=== Run {_run_i+1}/{args.num_runs} ===")
+        # Generate UUID + run dir
+        uuid8 = gen_uuid8()
+        run_dir = make_run_dir(config, args.label, uuid8)
+        # Collision check (extremely unlikely with 8 hex chars but cheap)
+        while run_dir.exists():
+            uuid8 = gen_uuid8()
+            run_dir = make_run_dir(config, args.label, uuid8)
+
+        # Build the sbatch script
+        # When num_runs > 1, all runs write designs to a shared dir
+        if args.num_runs > 1:
+            stack = f"{config['generator']}__{config['inverse_folder']}"
+            shared_designs_dir = CAMPAIGNS_DIR / config["target_id"] / stack / args.label / "designs"
+            shared_designs_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            shared_designs_dir = None
+        sbatch_str = BUILDERS[gen](config, run_dir, uuid8, shared_designs_dir=shared_designs_dir)
+
+        if args.dry_run:
+            print(f"# Would create: {run_dir}")
+            print(f"# UUID8: {uuid8}")
+            print("# --- sbatch script: ---")
+            print(sbatch_str)
+            if args.auto_refold:
+                print("# --- would also queue dependent refolds: ---")
+                _preview_dependent_refolds([run_dir], args.label, refold_overrides)
+            continue
+
+        # Create run dir + write provenance
+        run_dir.mkdir(parents=True, exist_ok=False)
+        (run_dir / "resolved_config.yaml").write_text(yaml.dump(config, default_flow_style=False))
+        sbatch_path = run_dir / "run.sbatch"
+        sbatch_path.write_text(sbatch_str)
+        sbatch_path.chmod(0o755)
+
+        # Submit
+        result = subprocess.run(
+            ["sbatch", str(sbatch_path)],
+            capture_output=True, text=True, check=True
+        )
+        # Extract job ID from "Submitted batch job 12345"
+        jobid_match = re.search(r"(\d+)", result.stdout)
+        jobid = jobid_match.group(1) if jobid_match else "unknown"
+
+        # Write run metadata
+        meta = {
+            "uuid8":     uuid8,
+            "jobid":     jobid,
+            "label":     args.label,
+            "submitted": datetime.now().isoformat(),
+            "host":      os.uname().nodename,
+            "user":      os.environ.get("USER", "unknown"),
+            "generator": gen,
+            "invfold":   config["inverse_folder"],
+            "target":    config["target_id"],
+            "config_path":  str(args.config_yaml.resolve()),
+            "overrides": overrides,
+        }
+        (run_dir / "run_meta.json").write_text(json.dumps(meta, indent=2))
+
+        print(f"Submitted: jobid={jobid}, uuid8={uuid8}")
+        print(f"Run dir:   {run_dir}")
+
+        # Auto-queue refolds with dependency on the design jobid
+        if args.auto_refold:
+            if args.num_runs > 1:
+                # Combine like multif: this run's designs were packed as a per-uuid
+                # slice into the shared <label>/designs/; refold reads that slice.
+                shared_run_dir = CAMPAIGNS_DIR / config["target_id"] / stack / args.label
+                print(f"--- Queuing per-run refold dependent on jobid={jobid} ---")
+                _submit_dependent_refolds(jobid, [shared_run_dir], args.label, refold_overrides,
+                                          designs_filter=uuid8, leaf_suffix=f"_{uuid8}")
+            else:
+                print(f"--- Queuing refolds dependent on jobid={jobid} ---")
+                _submit_dependent_refolds(jobid, [run_dir], args.label, refold_overrides)
+
+
+if __name__ == "__main__":
+    main()

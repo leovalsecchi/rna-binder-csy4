@@ -1,0 +1,23 @@
+# EXAMPLE gen model — BoltzDesign (BD1). Longest gen (~5-7h) -> 24h/120h tiers.
+name: boltzdesign
+kind: gen
+container:
+  sif: ${rb_root}/containers/boltzdesign.sif
+  apptainer_cmd: run
+  nv: true
+  binds: ["${shared}:${shared}"]
+  envs: {}
+entrypoint: "python boltzdesign_run.py"
+params: {}
+flag_style: {boolean_flags: [], render: "--{key} {value}"}
+per_unit_seed: true
+io:
+  needs: [target_pdb]
+  emits: designs/
+  units_per_job: 600
+compat_hints:
+  min_arch: sm_75              # arch-agnostic but ~6.4h median -> can't fit 4h
+  vram_g: 22
+  sec_per_unit: null
+probe:
+  jobname_match: "(bd1|boltzdesign)"

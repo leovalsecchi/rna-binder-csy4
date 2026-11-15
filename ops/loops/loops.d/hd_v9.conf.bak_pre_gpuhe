@@ -1,0 +1,14 @@
+# HD refold loop for midrun_v9 — consolidate finished leaves into the shared pool
+# (hd_combine.sh) then submit HD refolds. Clone of hd_v8.conf, RUN relabelled.
+# NOTE: no --gpuhe on purpose. HD *generation* now occupies gpuhe.bulk (tier 250); routing
+# HD refolds to gpuhe timed tiers (tier 1000) would preempt our own gen on the same nodes
+# and peel array tasks into singletons. Default routing keeps refolds on the public gpu.* pool.
+NAME=hd_v9
+RUN=midrun_v9
+WORKER='bash "$RB/ops/refold/hd_combine.sh" "$RUN" --go; python3 "$RB/ops/refold/hd_refold_bulk.py" --run "$RUN" --submit'
+INTERVAL=600
+END_MARGIN=12600
+CPUS=1
+REQUEUE=1
+AUTOSTOP_EMPTY=0
+ENABLED_FILE=

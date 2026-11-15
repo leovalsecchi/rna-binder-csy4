@@ -1,0 +1,433 @@
+#!/usr/bin/env python3
+"""app.py — interactive filter bench for the Csy4 binder campaign.
+
+    ~/miniconda3/bin/python ~/Documents/binder_filter/app.py     ->  http://127.0.0.1:8010
+
+Two scatter plots (sc_RMSD af3-vs-esm, sc_DockQ af3-vs-esm) over the whole campaign, a
+grouped AND/OR filter tree, and a breakdown of what survives versus the campaign baseline.
+
+**Every count and percentage is computed over the full store, never over the display
+subsample.** The subsample exists only so the browser can draw something; quoting a statistic
+from it while showing the full n is a bug this project has already shipped once.
+
+Boltz-2 is absent by construction: the store carries no b2 column.
+"""
+from __future__ import annotations
+
+import os
+import time
+
+import json
+import urllib.error
+import urllib.request
+
+import numpy as np
+from flask import Flask, jsonify, render_template, request, send_file
+
+import export as EX
+import filters as F
+from store import Store
+
+app = Flask(__name__)
+
+PORT = int(os.environ.get("BF_PORT", "8010"))
+HOST = os.environ.get("BF_HOST", "127.0.0.1")
+BRIDGE = "http://127.0.0.1:45001"      # open_refolds_server.py; proxied so the page never
+                                       # makes a cross-origin request and CORS never applies
+# On a remote deployment (Euler + ssh tunnel) the browser is on the viewer's own machine, so
+# the bridge is reachable from the BROWSER but never from this process. The page is told to
+# fall back to calling it directly in that case.
+REMOTE = os.environ.get("BF_REMOTE", "").strip() not in ("", "0", "false", "no")
+DEFAULT_SUB = 50_000
+CATEGORICAL = ("stack", "campaign", "gen", "invfold")
+NUM_BINS = 40
+UUID_CONC_CAP = 500_000
+
+STORE: Store | None = None
+STORE_ERR = ""
+_SUB: dict = {}                     # (size, stratify) -> row indices, cached
+
+
+def store() -> Store:
+    if STORE is None:
+        raise RuntimeError(STORE_ERR or "store not loaded")
+    return STORE
+
+
+def load_store():
+    global STORE, STORE_ERR
+    t0 = time.time()
+    try:
+        STORE = Store()
+        print(f"loaded store: {STORE.n:,} designs, {len(STORE.templates)} path templates, "
+              f"{time.time()-t0:.1f}s", flush=True)
+        for c in ("rog_af3", "rog_esm"):
+            if not STORE.has_data(c):
+                print(f"  note: {c} is all-NaN (placeholder) — that filter will be disabled",
+                      flush=True)
+    except Exception as e:                                    # noqa: BLE001
+        STORE_ERR = f"{type(e).__name__}: {e}"
+        print(f"STORE NOT LOADED: {STORE_ERR}", flush=True)
+
+
+def subsample(size: int, stratify: str | None):
+    key = (int(size), stratify or "")
+    if key not in _SUB:
+        _SUB[key] = store().subsample(size, stratify=stratify)
+    return _SUB[key]
+
+
+# --------------------------------------------------------------------------- meta
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/api/meta")
+def api_meta():
+    if STORE is None:
+        return jsonify({"ok": False, "error": STORE_ERR}), 503
+    s = store()
+    mets = []
+    for m in F.METRICS.values():
+        d = m.as_dict()
+        cols = [m.column(b) for b in (m.backends or [None])]
+        d["available"] = all(s.has_data(c) for c in cols)
+        vals = [s.col(c) for c in cols if c in s]
+        finite = [v[np.isfinite(v)] for v in vals]
+        finite = [v for v in finite if v.size]
+        if finite:
+            allv = np.concatenate(finite)
+            d["p01"] = float(np.percentile(allv, 1))
+            d["p99"] = float(np.percentile(allv, 99))
+            d["min"], d["max"] = float(allv.min()), float(allv.max())
+        mets.append(d)
+    return jsonify({
+        "ok": True, "n": s.n, "metrics": mets, "remote": REMOTE,
+        "vocabs": {c: s.vocabs.get(c, []) for c in CATEGORICAL},
+        "categorical": list(CATEGORICAL),
+        "numeric": ["length"] + s.numeric_cols(),
+        "iptm_values": list(F.IPTM_VALUES),
+        "built_utc": s.meta.get("built_utc", ""), "source": s.meta.get("source", ""),
+    })
+
+
+@app.route("/api/scatter")
+def api_scatter():
+    size = int(request.args.get("size", DEFAULT_SUB))
+    strat = request.args.get("stratify") or None
+    s = store()
+    idx = subsample(size, "stack" if strat else None)
+    out = {"idx": idx.tolist(), "stack": s.col("stack")[idx].tolist()}
+    for c in ("rmsd_af3", "rmsd_esm", "dockq_af3", "dockq_esm"):
+        v = s.col(c)[idx]
+        out[c] = [None if not np.isfinite(x) else round(float(x), 4) for x in v]
+    return jsonify(out)
+
+
+# ------------------------------------------------------------------------- filter
+
+_BASELINE: dict = {}       # field -> the parts that never change while the store is loaded
+
+
+def _baseline(s, field):
+    """Bin edges, the baseline histogram and the finite mask for one numeric field.
+
+    Cached because none of it depends on the filter: recomputing the percentiles meant
+    re-sorting the full 5.34M column on every threshold nudge, which was most of the
+    per-request latency."""
+    if field in _BASELINE:
+        return _BASELINE[field]
+    v = s.col(field).astype(np.float64)
+    ok = np.isfinite(v)
+    if not ok.any():
+        _BASELINE[field] = None
+        return None
+    lo, hi = np.percentile(v[ok], [0.5, 99.5])
+    if hi <= lo:
+        lo, hi = float(v[ok].min()), float(v[ok].max())
+        if hi <= lo:
+            hi = lo + 1.0
+    edges = np.linspace(lo, hi, NUM_BINS + 1)
+    hb, _ = np.histogram(v[ok], bins=edges)
+    _BASELINE[field] = (v, ok, edges, hb, float(np.median(v[ok])))
+    return _BASELINE[field]
+
+
+_CAT_BASE: dict = {}
+
+
+def _breakdown(s, mask, field):
+    """Filtered vs baseline for one field, plus an enrichment ratio."""
+    n_pass = int(mask.sum())
+    if field in CATEGORICAL:
+        codes = s.col(field)
+        names = s.vocabs.get(field, [])
+        if field not in _CAT_BASE:
+            _CAT_BASE[field] = np.bincount(codes, minlength=len(names))
+        base = _CAT_BASE[field]
+        filt = np.bincount(codes[mask], minlength=len(names))
+        rows = []
+        for i, nm in enumerate(names):
+            bp = 100.0 * base[i] / s.n if s.n else 0.0
+            fp = 100.0 * filt[i] / n_pass if n_pass else 0.0
+            rows.append({"name": nm, "n_base": int(base[i]), "n_pass": int(filt[i]),
+                         "pct_base": bp, "pct_pass": fp,
+                         "enrich": (fp / bp) if bp > 0 else None,
+                         "pct_of_group": 100.0 * filt[i] / base[i] if base[i] else 0.0})
+        return {"kind": "categorical", "rows": rows}
+
+    b = _baseline(s, field)
+    if b is None:
+        return {"kind": "empty"}
+    v, ok, edges, hb, med_base = b
+    sel = ok & mask
+    hf, _ = np.histogram(v[sel], bins=edges)
+    return {"kind": "numeric", "edges": edges.tolist(),
+            "base": (hb / max(1, hb.sum())).tolist(),
+            "filt": (hf / max(1, hf.sum())).tolist(),
+            "median_base": med_base,
+            "median_filt": float(np.median(v[sel])) if sel.any() else None}
+
+
+@app.route("/api/filter", methods=["POST"])
+def api_filter():
+    req = request.get_json(force=True) or {}
+    spec = req.get("spec") or {}
+    s = store()
+    t0 = time.time()
+    try:
+        mask, info = F.evaluate(s, spec)
+    except (ValueError, KeyError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    n_pass = int(mask.sum())
+
+    # per-stack: share of the passing set AND share of that stack that survived
+    codes, names = s.col("stack"), s.vocabs.get("stack", [])
+    base = np.bincount(codes, minlength=len(names))
+    filt = np.bincount(codes[mask], minlength=len(names))
+    by_stack = [{"name": nm, "n_pass": int(filt[i]), "n_base": int(base[i]),
+                 "pct_of_pass": 100.0 * filt[i] / n_pass if n_pass else 0.0,
+                 "pct_of_stack": 100.0 * filt[i] / base[i] if base[i] else 0.0}
+                for i, nm in enumerate(names)]
+
+    t1 = spec.get("tiers", {}).get("t1", {})
+    thr = {}
+    for a in F.tier_atoms(t1):
+        if a.get("on", True) and a.get("backend") in ("af3", "esm"):
+            thr.setdefault(a["metric"], {})[a["backend"]] = float(a["value"])
+    quads = {}
+    for mk in ("rmsd", "dockq"):
+        t = thr.get(mk)
+        if t and "af3" in t and "esm" in t:
+            # shaded by THIS metric's own op — the two plots ask different questions and can
+            # carry different ops, so the tier op would shade one of them wrongly
+            quads[mk] = F.quadrants(s, mk, t["af3"], t["esm"],
+                                    F.op_for_metric(t1, mk), pass_mask=mask)
+
+    idx = subsample(int(req.get("sub_size", DEFAULT_SUB)),
+                    "stack" if req.get("stratify") else None)
+    sub_pass = np.flatnonzero(mask[idx]).tolist()
+
+    breakdowns = {f: _breakdown(s, mask, f) for f in (req.get("breakdowns") or [])
+                  if f in CATEGORICAL or f in s or f == "length"}
+
+    # uuid8 concentration — how many distinct design runs the survivors come from. Capped:
+    # np.unique over a memmapped byte column costs a sort, and above this the question
+    # ("is my shortlist coming from a handful of runs?") is not the one being asked anyway.
+    uconc = None
+    if 0 < n_pass <= UUID_CONC_CAP:
+        # index with the row NUMBERS, not the boolean mask: a boolean take on a memmapped
+        # byte column pulls the whole 85 MB file through every request
+        u = s.col("uuid8")[np.flatnonzero(mask)]
+        _, cnt = np.unique(u, return_counts=True)
+        cnt = np.sort(cnt)[::-1]
+        uconc = {"n_uuid": int(cnt.size),
+                 "top10_share": float(100.0 * cnt[:10].sum() / n_pass)}
+
+    return jsonify({
+        "ok": True, "n_total": s.n, "n_pass": n_pass,
+        "pct": 100.0 * n_pass / s.n if s.n else 0.0,
+        "info": info, "agreement": F.agreement_split(s, spec),
+        "by_stack": by_stack, "quadrants": quads, "breakdowns": breakdowns,
+        "uuid_concentration": uconc,
+        "sub_pass": sub_pass, "sub_n": int(len(idx)),
+        "ms": round(1000 * (time.time() - t0)),
+    })
+
+
+# ------------------------------------------------------------------- designs / open
+
+def _design_payload(s, i):
+    p = s.paths(int(i))
+    row = {"i": int(i), "design_id": s.col("design_id")[i].decode(),
+           "uuid8": s.col("uuid8")[i].decode(),
+           "length": int(s.col("length")[i]),
+           "refs": {"design": p["designed_cif_path"], "af3": p["af3_msaoff_cif_path"],
+                    "esm": p["esm_cif_path"]}}
+    for c in CATEGORICAL:
+        row[c] = s.label(c, int(s.col(c)[i]))
+    for c in s.numeric_cols():
+        v = float(s.col(c)[i])
+        row[c] = None if not np.isfinite(v) else round(v, 4)
+    return row
+
+
+@app.route("/api/design/<int:i>")
+def api_design(i):
+    s = store()
+    if not (0 <= i < s.n):
+        return jsonify({"ok": False, "error": "row out of range"}), 400
+    return jsonify({"ok": True, "design": _design_payload(s, i)})
+
+
+@app.route("/api/region_sample", methods=["POST"])
+def api_region_sample():
+    """N random designs from one quadrant of one plot, optionally intersected with the
+    current filter. Sampling is over the FULL population, not the drawn subsample."""
+    req = request.get_json(force=True) or {}
+    s = store()
+    mk, region = req.get("metric", "rmsd"), req.get("region", "both")
+    n = min(int(req.get("n", 20)), 100)
+    m = F.METRICS[mk]
+    x, y = s.col(m.column("af3")), s.col(m.column("esm"))
+    op = F.OPS[m.cmp]
+    ok = np.isfinite(x) & np.isfinite(y)
+    px = op(x, float(req["tx"])) & ok
+    py = op(y, float(req["ty"])) & ok
+    sel = {"both": px & py, "af3_only": px & ~py & ok,
+           "esm_only": ~px & py & ok, "neither": ~px & ~py & ok}[region]
+    if req.get("intersect_filter") and req.get("spec"):
+        mask, _ = F.evaluate(s, req["spec"])
+        sel = sel & mask
+    idx = np.flatnonzero(sel)
+    if idx.size == 0:
+        return jsonify({"ok": True, "n_region": 0, "designs": []})
+    rng = np.random.default_rng(int(req.get("seed", 0)) or None)
+    pick = rng.choice(idx, min(n, idx.size), replace=False)
+    return jsonify({"ok": True, "n_region": int(idx.size),
+                    "designs": [_design_payload(s, i) for i in np.sort(pick)]})
+
+
+# ------------------------------------------------------------------------ exports
+
+@app.route("/api/export/csv", methods=["POST"])
+def api_export_csv():
+    req = request.get_json(force=True) or {}
+    s = store()
+    mask, _ = F.evaluate(s, req.get("spec") or {})
+    n = int(mask.sum())
+    if n > EX.CSV_CONFIRM_CAP and not req.get("confirm"):
+        return jsonify({"ok": False, "need_confirm": True, "count": n})
+    try:
+        return jsonify({"ok": True, **EX.export_csv(s, mask, req.get("spec") or {},
+                                                    req.get("name") or "passing")})
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/export/cifs", methods=["POST"])
+def api_export_cifs():
+    req = request.get_json(force=True) or {}
+    s = store()
+    mask, _ = F.evaluate(s, req.get("spec") or {})
+    idx = np.flatnonzero(mask)
+    if idx.size > EX.CIF_CONFIRM_CAP and not req.get("confirm"):
+        return jsonify({"ok": False, "need_confirm": True, "count": int(idx.size)})
+    designs = [{"design_id": s.col("design_id")[i].decode(),
+                "refs": {k: v for k, v in zip(("design", "af3", "esm"),
+                                              (s.paths(int(i))["designed_cif_path"],
+                                               s.paths(int(i))["af3_msaoff_cif_path"],
+                                               s.paths(int(i))["esm_cif_path"]))}}
+               for i in idx.tolist()]
+    try:
+        return jsonify({"ok": True, "job": EX.start_cifs(designs,
+                                                         req.get("name") or "passing")})
+    except (ValueError, RuntimeError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/export/status")
+def api_export_status():
+    j = EX.job_status(request.args.get("job", ""))
+    return jsonify({"ok": j is not None, "job": j})
+
+
+# ------------------------------------------------------------- ChimeraX (proxied)
+
+@app.route("/api/open", methods=["POST"])
+def api_open():
+    """Open one design, or a set to cycle through, in ChimeraX. Proxied server-side so the
+    browser only ever talks to this app — no cross-origin request, no CORS to configure."""
+    req = request.get_json(force=True) or {}
+    s = store()
+    rows = req.get("rows") or ([req["row"]] if "row" in req else [])
+    rows = [int(i) for i in rows if 0 <= int(i) < s.n]
+    if not rows:
+        return jsonify({"ok": False, "error": "no rows"}), 400
+    designs = []
+    for i in rows:
+        p = s.paths(i)
+        designs.append({"id": s.col("design_id")[i].decode(),
+                        "design": p["designed_cif_path"],
+                        "af3": p["af3_msaoff_cif_path"],
+                        "esm": p["esm_cif_path"]})
+    payload = {"designs": designs, "label": req.get("label", "")}
+    if REMOTE:
+        # this process cannot reach the viewer's ChimeraX; hand the payload back so the page
+        # can post it to the bridge running on the machine the browser is on
+        return jsonify({"ok": True, "n": len(designs), "delegate": True, "payload": payload})
+    try:
+        r = urllib.request.urlopen(
+            urllib.request.Request(f"{BRIDGE}/openset", data=json.dumps(payload).encode(),
+                                   headers={"Content-Type": "application/json"}),
+            timeout=300)
+        return jsonify({"ok": True, "n": len(designs), "bridge": r.read().decode()[:2000]})
+    except urllib.error.URLError as e:
+        return jsonify({"ok": False, "n": len(designs), "delegate": True, "payload": payload,
+                        "error": f"bridge unreachable at {BRIDGE} ({e}). "
+                                 f"Start it with: openrefolds"}), 502
+
+
+@app.route("/static/plotly.min.js")
+def plotly_js():
+    """Served from the installed plotly package so the tool works with no network."""
+    import plotly
+    return send_file(os.path.join(os.path.dirname(plotly.__file__),
+                                  "package_data", "plotly.min.js"),
+                     mimetype="application/javascript")
+
+
+def warmup():
+    """Pay the lazy costs before anyone clicks. The first filter request otherwise computes
+    every finite-mask and baseline histogram from cold — 14 s on a freshly started Euler node,
+    which reads as a broken tool rather than a warming cache."""
+    s = store()
+    t0 = time.time()
+    groups = [{"key": m, "op": "AND",
+               "atoms": [{"metric": m, "backend": b, "cmp": F.METRICS[m].cmp,
+                          "value": F.METRICS[m].default, "on": True}
+                         for b in ("af3", "esm")]}
+              for m in ("rmsd", "dockq")]
+    spec = {"tiers": {"t1": {"op": "AND", "groups": groups}}, "combine": "AND",
+            "iptm": {"on": False}}
+    mask, _ = F.evaluate(s, spec)
+    F.agreement_split(s, spec)
+    for mk in ("rmsd", "dockq"):
+        F.quadrants(s, mk, F.METRICS[mk].default, F.METRICS[mk].default, "AND", pass_mask=mask)
+    for f in ["length"] + s.numeric_cols():
+        _baseline(s, f)
+    for f in CATEGORICAL:
+        _CAT_BASE[f] = np.bincount(s.col(f), minlength=len(s.vocabs.get(f, [])))
+    subsample(DEFAULT_SUB, None)
+    print(f"warmed caches in {time.time()-t0:.1f}s", flush=True)
+
+
+if __name__ == "__main__":
+    load_store()
+    if STORE is not None:
+        warmup()
+    print(f"binder_filter on http://{HOST}:{PORT}"
+          f"{'  (remote mode: ChimeraX handled browser-side)' if REMOTE else ''}", flush=True)
+    app.run(host=HOST, port=PORT, debug=False, threaded=True)

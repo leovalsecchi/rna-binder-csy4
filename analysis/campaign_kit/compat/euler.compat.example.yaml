@@ -1,0 +1,38 @@
+# compat/euler.compat.yaml — the "partition template". PROBE OUTPUT — do not hand-edit.
+# `campaign probe` writes one block per model with MEASURED values. The planner, the
+# bucketer, the looper, and a generated gpu_watcher/config.json all read this file.
+# This is a SCAFFOLD stub showing the schema + one worked example.
+_meta:
+  cluster: euler
+  probed_at: null            # set to the probe date, e.g. 2026-07-14
+  kit_version: "0.1-scaffold"
+
+# ---- schema (one block per model) ----
+# <model_name>:
+#   runs_on:        [pool, ...]        # pools where the calibration job PASSED (others auto-excluded)
+#   min_arch:       sm_NN              # confirmed floor (probe failed below it)
+#   vram_peak_g:    float              # MEASURED peak gres/gpumem + headroom
+#   gpuutil_pct:    int                # MEASURED gres/gpuutil
+#   sec_per_unit:   float              # ElapsedRaw / units
+#   units_per_job:  int                # tuned to fill ~90% of the chosen walltime tier
+#   walltime_tier:  4h|24h|120h|bulk
+#   req_gpumem_g:   int                # --gres=gpumem:<this>
+#   mem_per_cpu:    str                # from measured host RAM (the QOSMaxMemoryPerUser limiter)
+#   qos_concurrency:{ "<qos>/<tier>": int, ... }
+#   calibration_jobid: str
+#   measured_at:    date
+
+# ---- example (what the probe WILL produce for halludesign) ----
+# halludesign:
+#   runs_on: [gpuhe, gpupr]           # gpu(sm_75) calibration FAILED -> excluded automatically
+#   min_arch: sm_80
+#   vram_peak_g: 22.9                 # measured — supersedes the legacy '79.5G' myth
+#   gpuutil_pct: 96
+#   sec_per_unit: 36
+#   units_per_job: 150
+#   walltime_tier: 24h
+#   req_gpumem_g: 24
+#   mem_per_cpu: 7G
+#   qos_concurrency: {es_wicky/gpuhe/24: 50, es_wicky/gpuhe/120: 29}
+#   calibration_jobid: "71xxxxx"
+#   measured_at: 2026-07-14

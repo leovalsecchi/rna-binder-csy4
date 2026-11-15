@@ -1,0 +1,72 @@
+# RFD3 multif meta config for csy4_crrna_free.
+#
+# Runs RFD3 normally (diffusion + bundled inverse-fold), then ignores the
+# bundled-LiMPNN sequence and re-runs LigandMPNN externally on the resulting
+# backbones with our mpnn_cli knobs. Mirrors boltzgen__multif but with one
+# inverse folder.
+#
+# Output layout (2 dirs, sharing the same uuid8):
+#   campaigns/<target>/_backbones/RFD3_len<N>_<uuid8>/      (raw RFD3 backbones, PDB)
+#   campaigns/<target>/rfd3__ligandmpnn/<label>_<uuid8>/    (external LiMPNN designs)
+#
+# Launch:
+#   python3 code/scripts/launch.py code/configs/rfd3__multif/default.yaml \
+#       --label test [--override generator_params.mpnn_cli.batch_size=8] ...
+
+target_id: csy4_crrna_free
+generator: rfd3
+inverse_folders: [ligandmpnn]    # plural form triggers multif dispatch
+config_kind: multif
+config_name: default
+
+slurm:
+  job_name: rfd3_multif
+  partition: gpuhe.4h
+  time: "04:00:00"
+  cpus_per_task: 4
+  mem_per_cpu: "5G"
+  gpus: "rtx_4090:1"
+
+container:
+  # Foundry SIF (bundles RFD3 diffusion + an in-pipeline LiMPNN; we keep the
+  # backbones and discard the bundled sequence). Also used for CIF->PDB
+  # conversion of the .cif.gz outputs (Bio.PDB is bundled).
+  rfd3_sif: /cluster/work/wicky/containers/foundry.sif
+  activate_script: /cluster/work/wicky/lvalsecchi/rfdiffusion3/activate/foundry.activate.sh
+
+  # External LigandMPNN container (same one BG multif uses; gives consistent
+  # mpnn_cli semantics across stacks).
+  ligandmpnn_sif: /cluster/work/wicky/containers/LigandMPNN.sif
+  ligandmpnn_weights: /cluster/work/wicky/params/foundry/ligandmpnn_v_32_010_25.pt
+
+generator_params:
+  # RFD3 inputs (same as code/configs/rfd3/default.yaml)
+  inputs: /cluster/work/wicky/lvalsecchi/rfdiffusion3/examples/rna/csy4_crrna.json
+  cwd: /cluster/work/wicky/lvalsecchi/rfdiffusion3/examples/rna
+  n_batches: 8                  # backbones = n_batches × diffusion_batch_size
+  diffusion_batch_size: 8       # RFD3 GPU batch (default 8; lower for VRAM, higher for throughput)
+  prevalidate_inputs: true
+  skip_existing: false
+
+  # External LigandMPNN CLI flags (applied per backbone). Total seqs per
+  # backbone = batch_size * number_of_batches.
+  mpnn_cli:
+    omit_AA: C                  # exclude cysteine (disulfide/reactivity); matches boltzgen/boltzdesign
+    chains_to_design: A         # IGNORED: rfd3_multif.sh auto-detects the protein
+                                # chain at run time (RFD3 .cif has protein=chain B, RNA=A)
+    batch_size: 10
+    number_of_batches: 1
+    temperature: 0.1
+    seed: 42
+
+# Notes:
+# - RFD3 writes N = n_batches * 8 .cif.gz files into a workdir under
+#   _backbones/RFD3_len<L>_<uuid>/rfd3_workdir/. We decompress + CIF->PDB
+#   convert each into _backbones/RFD3_len<L>_<uuid>/spec_<idx>.pdb.
+# - LiMPNN consumes those PDBs; outputs land in
+#   rfd3__ligandmpnn/<label>_<uuid>/designs/ as
+#   <prefix>_design<D>_seq<S>.pdb (same naming as BG multif's LiMPNN outputs).
+# - The bundled-LiMPNN sequence inside each .cif.gz is intentionally
+#   discarded — we only keep RFD3's backbone coordinates.
+# - Length is currently hardcoded to 80 (matches the binder length in the RFD3
+#   input JSON for csy4); update if you change the target.

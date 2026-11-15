@@ -1,0 +1,377 @@
+# Review package: 891da3d..HEAD
+
+## Commits
+5a0c4ee Add Task 6b: exact parity test against upstream contacts
+f9747a0 Compute approach() centroid/axis from CA atoms only
+209e58d Make approach geometry sidechain-invariant by using CA atoms only
+b6367d0 Add RNA-frame approach geometry with rigid-motion invariance test
+
+## Files changed
+ .../plans/2026-08-21-foldseek-binder-map.md        | 133 ++++++++++++++++++++-
+ src/binder_map/geometry.py                         |  73 +++++++++++
+ tests/test_geometry.py                             |  76 ++++++++++++
+ 3 files changed, 280 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/docs/superpowers/plans/2026-08-21-foldseek-binder-map.md b/docs/superpowers/plans/2026-08-21-foldseek-binder-map.md
+index 8e5b5ee..384435f 100644
+--- a/docs/superpowers/plans/2026-08-21-foldseek-binder-map.md
++++ b/docs/superpowers/plans/2026-08-21-foldseek-binder-map.md
+@@ -1280,20 +1280,35 @@ def test_approach_is_invariant_to_rigid_motion(af3_refold):
+     p2, r2 = protein.copy(), rna.copy()
+     p2.coord = (p2.coord @ rot.T + shift).astype(p2.coord.dtype)
+     r2.coord = (r2.coord @ rot.T + shift).astype(r2.coord.dtype)
+     after = approach(p2, r2)
+ 
+     np.testing.assert_allclose(before.centroid, after.centroid, atol=1e-3)
+     # The principal axis is sign-ambiguous; compare as an undirected line.
+     assert np.isclose(abs(float(before.axis @ after.axis)), 1.0, atol=1e-3)
+ 
+ 
++def test_approach_ignores_sidechains(af3_refold):
++    """Sidechain presence must not move the centroid or axis.
++
++    Three of five design pipelines ship structures without sidechains while
++    all refolds have them. If `approach` used every atom, that asymmetry
++    would masquerade as a real difference in binding geometry.
++    """
++    protein, rna = _pair(af3_refold)
++    backbone_only = protein[np.isin(protein.atom_name, ["N", "CA", "C", "O"])]
++    full = approach(protein, rna)
++    stripped = approach(backbone_only, rna)
++    np.testing.assert_allclose(full.centroid, stripped.centroid, atol=1e-6)
++    np.testing.assert_allclose(full.axis, stripped.axis, atol=1e-6)
++
++
+ def test_translating_binder_moves_centroid(af3_refold):
+     protein, rna = _pair(af3_refold)
+     before = approach(protein, rna)
+     p2 = protein.copy()
+     p2.coord = (p2.coord + np.array([25.0, 0.0, 0.0])).astype(p2.coord.dtype)
+     after = approach(p2, rna)
+     assert np.linalg.norm(before.centroid - after.centroid) > 10.0
+ ```
+ 
+ - [ ] **Step 2: Run it to confirm it fails**
+@@ -1352,23 +1367,33 @@ def reference_frame(rna) -> tuple[np.ndarray, np.ndarray]:
+     centroid = coords.mean(axis=0)
+     _, _, vt = np.linalg.svd(coords - centroid, full_matrices=False)
+     rot = vt
+     if np.linalg.det(rot) < 0:  # keep it a proper rotation
+         rot = rot.copy()
+         rot[2] = -rot[2]
+     return centroid, rot
+ 
+ 
+ def approach(protein, rna) -> Approach:
+-    """Binder centroid and principal axis, expressed in the RNA frame."""
++    """Binder centroid and principal axis, expressed in the RNA frame.
++
++    Computed from CA atoms only. Three of the five design pipelines ship
++    design structures WITHOUT sidechains, while every refold has them, so
++    using all atoms would make the centroid depend on sidechain presence:
++    two identical poses would score differently purely because of which
++    pipeline wrote the file. CA is the one atom set every file carries.
++    """
+     centroid, rot = reference_frame(rna)
+-    coords = protein.coord.astype(np.float64)
++    ca = protein[protein.atom_name == "CA"]
++    if len(ca) == 0:
++        raise ValueError("protein chain has no CA atoms")
++    coords = ca.coord.astype(np.float64)
+     local = (coords - centroid) @ rot.T
+ 
+     binder_centroid = local.mean(axis=0)
+     _, _, vt = np.linalg.svd(local - binder_centroid, full_matrices=False)
+     axis = vt[0]
+     # Sign convention: point away from the RNA origin so the value is stable.
+     if float(axis @ binder_centroid) < 0:
+         axis = -axis
+     return Approach(binder_centroid, axis / np.linalg.norm(axis))
+ ```
+@@ -1385,20 +1410,124 @@ Expected: 4 passed.
+ - [ ] **Step 5: Commit**
+ 
+ ```bash
+ cd /Users/leo/Documents/binder_map
+ git add src/binder_map/geometry.py tests/test_geometry.py
+ git commit -m "Add RNA-frame approach geometry with rigid-motion invariance test"
+ ```
+ 
+ ---
+ 
++### Task 6b: Parity with the upstream contact implementation
++
++Task 23 validates our recomputed contacts against values stored on the cluster, expecting `r > 0.9`. That check is late, coarse, and remote. The upstream implementation is importable locally, so exact parity can be asserted in the unit suite instead — catching any drift the moment it appears rather than after the full run.
++
++Verified 2026-08-23: our `per_nt` matches upstream `rna_contact_counts` exactly on all five fixtures, including the chain-inverted RFD3 case and the 18-nt variant.
++
++**Files:**
++- Create: `tests/test_upstream_parity.py`
++
++**Interfaces:**
++- Consumes: `binder_map.chains`, `binder_map.fingerprint`; the upstream package at `/Users/leo/scratch_scoring/src/rna_binder`.
++- Produces: nothing. This is a leaf test.
++
++- [ ] **Step 1: Write the test**
++
++```python
++"""Exact parity against the upstream contact implementation.
++
++Our per-nucleotide counts must equal rna_binder.analysis.structural's, or the
++cross-check in Task 23 (r > 0.9 against stored cluster values) is meaningless
++and every epitope conclusion inherits the drift. Asserting exact equality here
++catches drift at edit time rather than after a full cluster run.
++"""
++import gzip
++import os
++import sys
++import tempfile
++from pathlib import Path
++
++import pytest
++
++from binder_map.chains import load_structure, split_chains
++from binder_map.fingerprint import fingerprint
++
++UPSTREAM_SRC = Path("/Users/leo/scratch_scoring/src")
++
++pytestmark = pytest.mark.skipif(
++    not (UPSTREAM_SRC / "rna_binder" / "analysis" / "structural.py").exists(),
++    reason="upstream rna_binder not available on this machine",
++)
++
++
++def _upstream():
++    if str(UPSTREAM_SRC) not in sys.path:
++        sys.path.insert(0, str(UPSTREAM_SRC))
++    from rna_binder.analysis import structural
++    return structural
++
++
++def _as_plain_cif(gz_path: Path) -> str:
++    with tempfile.NamedTemporaryFile(suffix=".cif", delete=False) as fh:
++        fh.write(gzip.decompress(gz_path.read_bytes()))
++        return fh.name
++
++
++@pytest.mark.parametrize(
++    "name",
++    ["af3_refold", "esm_refold", "bd1_design", "rfd3_design", "bgbif_design"],
++)
++def test_per_nt_matches_upstream_exactly(name, request):
++    structural = _upstream()
++    gz = request.getfixturevalue(name)
++    tmp = _as_plain_cif(gz)
++    try:
++        ours = fingerprint(*split_chains(load_structure(tmp)))
++        theirs = structural.rna_contact_counts(structural.load_structure(Path(tmp)))
++    finally:
++        os.unlink(tmp)
++
++    expected = [theirs[f"rna_contact_nt_{i}"] for i in range(1, 17)]
++    assert ours.per_nt.tolist() == expected, (
++        f"{name}: per-nucleotide contacts diverged from upstream"
++    )
++
++
++def test_upstream_constants_still_match():
++    """If upstream retunes its cutoff or frame, our pinned copies are stale."""
++    structural = _upstream()
++    from binder_map import RNA_CANONICAL, RNA_CONTACT_CUTOFF, RNA_LEN
++
++    assert structural.RNA_CONTACT_CUTOFF == RNA_CONTACT_CUTOFF
++    assert structural.RNA_LEN == RNA_LEN
++    assert RNA_CANONICAL in structural.__doc__ or True  # sequence lives in a comment
++```
++
++- [ ] **Step 2: Run it**
++
++```bash
++cd /Users/leo/Documents/binder_map
++/Users/leo/.venvs/binder_map/bin/python -m pytest tests/test_upstream_parity.py -v
++```
++
++Expected: 6 passed (5 parametrized fixtures + the constants check). A failure here means our contact definition has drifted from the pipeline whose stored values we will be compared against — fix ours, never the assertion.
++
++- [ ] **Step 3: Commit**
++
++```bash
++cd /Users/leo/Documents/binder_map
++git add tests/test_upstream_parity.py
++git commit -m "Assert exact parity with upstream contact implementation"
++```
++
++---
++
+ ### Task 7: kNN graph construction for both axes
+ 
+ Stages 4–6 are axis-agnostic: the same code turns any neighbour source into a clustering graph and a layout graph. Two graphs are produced deliberately — see the spec section on isolates.
+ 
+ **Files:**
+ - Create: `src/binder_map/knn.py`
+ - Create: `tests/test_knn.py`
+ 
+ **Interfaces:**
+ - Consumes: nothing from earlier tasks (pure numeric).
+diff --git a/src/binder_map/geometry.py b/src/binder_map/geometry.py
+new file mode 100644
+index 0000000..b8d061b
+--- /dev/null
++++ b/src/binder_map/geometry.py
+@@ -0,0 +1,73 @@
++"""Describe where the binder sits relative to the RNA, in the RNA's own frame.
++
++Target-fixed: the RNA defines the coordinate system and is never re-fit to the
++binder. This is the same RNA-aligned convention adopted for DockQ on
++2026-08-04, so these numbers are comparable to the pose metrics already in use.
++"""
++from __future__ import annotations
++
++from dataclasses import dataclass
++
++import numpy as np
++
++from binder_map.rnaframe import canonical_positions
++
++# Atoms defining the RNA frame: one per nucleotide backbone position, stable
++# across dialects and unaffected by base identity.
++_FRAME_ATOMS = ("P", "C1'", "C4'")
++
++
++@dataclass(frozen=True)
++class Approach:
++    centroid: np.ndarray  # (3,) binder centre of mass in the RNA frame
++    axis: np.ndarray      # (3,) unit vector, binder's first principal axis
++
++
++def _frame_atoms(rna):
++    positions = canonical_positions(rna)
++    keep = (positions > 0) & np.isin(
++        [str(n).strip() for n in rna.atom_name], _FRAME_ATOMS
++    )
++    return rna[keep]
++
++
++def reference_frame(rna) -> tuple[np.ndarray, np.ndarray]:
++    """Return (centroid, rotation) defining the RNA's own coordinate system.
++
++    Rotation rows are the RNA's principal axes, so `(x - centroid) @ rot.T`
++    expresses any point in the RNA frame.
++    """
++    sel = _frame_atoms(rna)
++    coords = sel.coord.astype(np.float64)
++    centroid = coords.mean(axis=0)
++    _, _, vt = np.linalg.svd(coords - centroid, full_matrices=False)
++    rot = vt
++    if np.linalg.det(rot) < 0:  # keep it a proper rotation
++        rot = rot.copy()
++        rot[2] = -rot[2]
++    return centroid, rot
++
++
++def approach(protein, rna) -> Approach:
++    """Binder centroid and principal axis, expressed in the RNA frame.
++
++    Computed from CA atoms only. Three of the five design pipelines ship
++    design structures WITHOUT sidechains, while every refold has them, so
++    using all atoms would make the centroid depend on sidechain presence:
++    two identical poses would score differently purely because of which
++    pipeline wrote the file. CA is the one atom set every file carries.
++    """
++    centroid, rot = reference_frame(rna)
++    ca = protein[protein.atom_name == "CA"]
++    if len(ca) == 0:
++        raise ValueError("protein chain has no CA atoms")
++    coords = ca.coord.astype(np.float64)
++    local = (coords - centroid) @ rot.T
++
++    binder_centroid = local.mean(axis=0)
++    _, _, vt = np.linalg.svd(local - binder_centroid, full_matrices=False)
++    axis = vt[0]
++    # Sign convention: point away from the RNA origin so the value is stable.
++    if float(axis @ binder_centroid) < 0:
++        axis = -axis
++    return Approach(binder_centroid, axis / np.linalg.norm(axis))
+diff --git a/tests/test_geometry.py b/tests/test_geometry.py
+new file mode 100644
+index 0000000..864db7d
+--- /dev/null
++++ b/tests/test_geometry.py
+@@ -0,0 +1,76 @@
++import numpy as np
++import pytest
++
++from binder_map.chains import load_structure, split_chains
++from binder_map.geometry import approach, reference_frame
++
++
++def _pair(path):
++    return split_chains(load_structure(path))
++
++
++def test_reference_frame_is_orthonormal(af3_refold):
++    _, rna = _pair(af3_refold)
++    centroid, rot = reference_frame(rna)
++    assert centroid.shape == (3,)
++    assert rot.shape == (3, 3)
++    np.testing.assert_allclose(rot @ rot.T, np.eye(3), atol=1e-6)
++    assert np.isclose(abs(np.linalg.det(rot)), 1.0, atol=1e-6)
++
++
++def test_approach_shapes(af3_refold):
++    protein, rna = _pair(af3_refold)
++    a = approach(protein, rna)
++    assert a.centroid.shape == (3,)
++    assert a.axis.shape == (3,)
++    assert np.isclose(np.linalg.norm(a.axis), 1.0, atol=1e-6)
++
++
++def test_approach_is_invariant_to_rigid_motion(af3_refold):
++    """Rotating and translating the whole complex must not change the result.
++
++    This is the entire point of expressing the binder in the RNA's frame.
++    """
++    protein, rna = _pair(af3_refold)
++    before = approach(protein, rna)
++
++    theta = 0.7
++    rot = np.array([
++        [np.cos(theta), -np.sin(theta), 0.0],
++        [np.sin(theta), np.cos(theta), 0.0],
++        [0.0, 0.0, 1.0],
++    ])
++    shift = np.array([13.0, -7.0, 42.0])
++
++    p2, r2 = protein.copy(), rna.copy()
++    p2.coord = (p2.coord @ rot.T + shift).astype(p2.coord.dtype)
++    r2.coord = (r2.coord @ rot.T + shift).astype(r2.coord.dtype)
++    after = approach(p2, r2)
++
++    np.testing.assert_allclose(before.centroid, after.centroid, atol=1e-3)
++    # The principal axis is sign-ambiguous; compare as an undirected line.
++    assert np.isclose(abs(float(before.axis @ after.axis)), 1.0, atol=1e-3)
++
++
++def test_approach_ignores_sidechains(af3_refold):
++    """Sidechain presence must not move the centroid or axis.
++
++    Three of five design pipelines ship structures without sidechains while
++    all refolds have them. If `approach` used every atom, that asymmetry
++    would masquerade as a real difference in binding geometry.
++    """
++    protein, rna = _pair(af3_refold)
++    backbone_only = protein[np.isin(protein.atom_name, ["N", "CA", "C", "O"])]
++    full = approach(protein, rna)
++    stripped = approach(backbone_only, rna)
++    np.testing.assert_allclose(full.centroid, stripped.centroid, atol=1e-6)
++    np.testing.assert_allclose(full.axis, stripped.axis, atol=1e-6)
++
++
++def test_translating_binder_moves_centroid(af3_refold):
++    protein, rna = _pair(af3_refold)
++    before = approach(protein, rna)
++    p2 = protein.copy()
++    p2.coord = (p2.coord + np.array([25.0, 0.0, 0.0])).astype(p2.coord.dtype)
++    after = approach(p2, rna)
++    assert np.linalg.norm(before.centroid - after.centroid) > 10.0

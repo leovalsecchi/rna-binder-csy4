@@ -1,0 +1,4 @@
+rfd3|4b1043ef|na|/cluster/work/wicky/lvalsecchi/rna_binder/campaigns/csy4_crrna_free/rfd3__ligandmpnn/midrun_v4_4b1043ef/run.sbatch
+boltzgen|dc7fe23b|na|/cluster/work/wicky/lvalsecchi/rna_binder/campaigns/csy4_crrna_free/boltzgen__boltzif/midrun_v4_dc7fe23b/run.sbatch
+bd1|fcdc1a0d|na|/cluster/work/wicky/lvalsecchi/rna_binder/campaigns/csy4_crrna_free/boltzdesign__ligandmpnn/midrun_v4_fcdc1a0d/run.sbatch
+hd|46db14f3|na|/cluster/work/wicky/lvalsecchi/rna_binder/campaigns/csy4_crrna_free/halludesign__ligandmpnn/midrun_v4_46db14f3/run.sbatch

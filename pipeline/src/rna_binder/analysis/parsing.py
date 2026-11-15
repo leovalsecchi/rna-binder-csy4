@@ -1,0 +1,166 @@
+"""Parse canonical design + refold filenames into structured metadata.
+
+Canonical grammar (all stacks):
+    <target>_<gen>_<invfold>_len<N>_<uuid8>_<stack_axes>[_<refolder>_<refold_axes>].ext
+
+Stack-specific axes:
+    Most stacks: _design<D>_seq<S>
+    HD:          _recycle<N>_sample<S>_pack<K>
+
+Refolder-specific axes:
+    AF3: _AF3_seed<seed>_sample<sample>
+    B2:  _B2_sample<sample>
+
+Examples:
+    csy4free_RFD3_LiMPNN_len80_b4ed9efe_design0.cif.gz            (native, no seq)
+    csy4free_BG_LiMPNN_len80_c11f8952_design3_seq2.pdb            (native)
+    csy4free_BG_BIF_len80_944db4e5_design0_seq0.cif               (native)
+    csy4free_HD_LiMPNN_len80_<uuid>_recycle3_sample2_pack1.pdb    (native)
+    csy4free_RFD3_LiMPNN_len80_b4ed9efe_design0_AF3_seed1_sample0.cif
+    csy4free_BG_BIF_len80_944db4e5_design0_seq0_B2_sample4.cif
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+
+GEN_NAMES = {
+    "RFD3": "RFdiffusion3",
+    "HD": "HalluDesign",
+    "BG": "BoltzGen",
+    "BD1": "BoltzDesign1",
+}
+
+INVFOLD_NAMES = {
+    "LiMPNN": "LigandMPNN",
+    "BIF": "BoltzIF",
+}
+
+REFOLDER_NAMES = {
+    "AF3": "AlphaFold3",
+    "ESM": "ESMFold2",
+    "B2": "Boltz-2",
+}
+
+
+# Canonical filename pattern, broken into named groups
+_PATTERN = re.compile(
+    r"""^
+    (?P<target>[a-zA-Z0-9]+)             # target abbreviation (e.g. csy4free)
+    _
+    (?P<gen>RFD3|HD|BG|BD1)              # generator abbreviation
+    _
+    (?P<invfold>LiMPNN|BIF)              # inverse folder abbreviation
+    _
+    len(?P<length>\d+)                   # binder length
+    _
+    (?P<uuid8>[0-9a-f]{8})               # run uuid8
+    _
+    (?:                                  # stack-specific axes:
+        design(?P<design_id>\d+)         #   design<D>
+        (?:_seq(?P<seq_id>\d+))?         #     [optional _seq<S>]
+        |
+        recycle(?P<cycle>\d+)            #   HD: recycle<N>_sample<S>_pack<K>
+        _sample(?P<hd_sample>\d+)
+        _pack(?P<pack>\d+)
+    )
+    (?:                                  # optional refolder suffix:
+        _(?P<refolder>AF3|B2|ESM)
+        (?:_seed(?P<seed>\d+))?          # AF3 only
+        _sample(?P<sample_id>\d+)        # AF3 / B2 / ESM (ESM: _ESM_sample0)
+    )?
+    \.(?P<ext>cif|pdb|cif\.gz)
+    $""",
+    re.VERBOSE,
+)
+
+
+@dataclass
+class ParsedName:
+    """Structured metadata extracted from a canonical filename."""
+
+    file: str                            # original filename
+    target: str                          # e.g. "csy4free"
+    gen: str                             # generator abbr: RFD3 / HD / BG / BD1
+    invfold: str                         # invfold abbr: LiMPNN / BIF
+    length: int                          # binder length in residues
+    uuid8: str                           # source run uuid (8 hex chars)
+    ext: str                             # file extension
+    # Stack-specific (one of these branches is populated)
+    design_id: Optional[int] = None      # for non-HD stacks (and HD's flattened canonical: derived)
+    seq_id: Optional[int] = None         # 0..K-1 inverse-fold seq within backbone
+    # HD-specific
+    cycle: Optional[int] = None
+    hd_sample: Optional[int] = None      # HD's sample index within a cycle
+    pack: Optional[int] = None
+    # Refolder-specific (populated only if this is a refold output)
+    refolder: Optional[str] = None       # "AF3" / "B2" / None
+    seed: Optional[int] = None           # AF3 only
+    sample_id: Optional[int] = None      # refold diffusion sample index
+
+    # Derived convenience fields
+    stack: str = field(init=False)
+    is_refold: bool = field(init=False)
+
+    def __post_init__(self):
+        self.stack = f"{self.gen}+{self.invfold}"
+        self.is_refold = self.refolder is not None
+
+    def to_dict(self) -> dict:
+        d = {
+            "file": self.file,
+            "target": self.target,
+            "gen": self.gen,
+            "invfold": self.invfold,
+            "stack": self.stack,
+            "length": self.length,
+            "uuid8": self.uuid8,
+            "ext": self.ext,
+            "design_id": self.design_id,
+            "seq_id": self.seq_id,
+            "cycle": self.cycle,
+            "hd_sample": self.hd_sample,
+            "pack": self.pack,
+            "refolder": self.refolder,
+            "seed": self.seed,
+            "sample_id": self.sample_id,
+            "is_refold": self.is_refold,
+        }
+        return d
+
+
+def parse_filename(name: str | Path) -> Optional[ParsedName]:
+    """Parse a canonical filename. Returns None if it doesn't match.
+
+    Args:
+        name: filename or path (basename used)
+
+    Returns:
+        ParsedName with all extractable fields, or None if not a canonical name
+    """
+    name = Path(name).name if isinstance(name, (Path, str)) else name
+    m = _PATTERN.match(str(name))
+    if not m:
+        return None
+    gd = m.groupdict()
+    return ParsedName(
+        file=str(name),
+        target=gd["target"],
+        gen=gd["gen"],
+        invfold=gd["invfold"],
+        length=int(gd["length"]),
+        uuid8=gd["uuid8"],
+        ext=gd["ext"],
+        design_id=int(gd["design_id"]) if gd["design_id"] else (int(gd["hd_sample"]) if gd["hd_sample"] else None),
+        seq_id=int(gd["seq_id"]) if gd["seq_id"] else None,
+        cycle=int(gd["cycle"]) if gd["cycle"] else None,
+        hd_sample=int(gd["hd_sample"]) if gd["hd_sample"] else None,
+        pack=int(gd["pack"]) if gd["pack"] else None,
+        refolder=gd["refolder"],
+        seed=int(gd["seed"]) if gd["seed"] else None,
+        sample_id=int(gd["sample_id"]) if gd["sample_id"] else None,
+    )

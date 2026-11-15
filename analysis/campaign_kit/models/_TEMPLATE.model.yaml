@@ -1,0 +1,41 @@
+# models/<name>.model.yaml — LAYER ② a model, declaratively. Author ONCE per model.
+# This replaces adding a build_*_sbatch() function to launch.py. Copy this file,
+# fill it in, then `campaign probe --model <name>` measures how it runs on each pool.
+name: MY_MODEL
+kind: gen                      # gen | inverse_fold | refold
+
+container:
+  sif: /abs/path/to/model.sif
+  apptainer_cmd: run           # run | exec
+  nv: true                     # --nv (GPU)
+  binds: ["/cluster/work/wicky:/cluster/work/wicky"]
+  envs: {}                     # extra env vars for the container
+
+workdir: /abs/path/to/model/checkout       # cwd inside the container (optional)
+entrypoint: "python ./run.py"              # the command; params below are appended as flags
+
+params:                        # model defaults; a campaign stack can override any of these
+  num_designs: 1
+  # ... model-specific knobs ...
+
+flag_style:                    # how params become CLI flags (replaces launch.py's hardcoded expansion)
+  boolean_flags: []            # keys rendered as a bare "--key" when true (no value)
+  render: "--{key} {value}"    # default rendering for the rest
+
+per_unit_seed: false           # if true, the launcher sets a distinct seed per uuid (avoids duplicate outputs)
+
+io:
+  needs: [target_pdb, rna_sequence]   # inputs this model consumes from the campaign target
+  emits: designs/                     # output subdir the pipeline packs to <uuid>.designs.tar.zst
+  units_per_job: 1                    # designs (or refolds) produced per job; probe tunes to fill walltime
+
+compat_hints:                  # SEED ONLY — the probe overwrites these with MEASURED values.
+  min_arch: null               # e.g. sm_80 if you know it needs Ampere+; null = let the probe discover it
+  vram_g: null                 # rough peak VRAM guess; probe measures the real peak
+  sec_per_unit: null           # rough seconds/unit guess; probe measures
+
+probe:
+  jobname_match: null          # regex matching this model's sacct JobName (for history-harvest);
+                               # e.g. "(^|_)hd$" or "(refold_af3|rfaf3)". null -> defaults to the model name.
+  calib_params: {}             # cold-probe (`--calibrate`) only: a small params override so the
+                               # calibration job runs quickly, e.g. {num_designs: 1}.

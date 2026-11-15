@@ -1,0 +1,34 @@
+# cluster/euler.yaml — LAYER ① static cluster inventory. Written once; ~never edited.
+# Machine-readable form of GPU_JOB_COMPAT.md. The probe consults this to pick which
+# pools to test a model on; the planner uses caps/tiers to route + throttle.
+cluster: euler
+scratch_roots: ["$TMPDIR", "/scratch", "/tmp"]   # node-local ONLY — extraction never touches /cluster (inode-flood guardrail)
+walltime_tiers: [4h, 24h, 120h, bulk]            # ETH job_submit enforces --time <= tier; partition name encodes the tier
+blackhole_excludes: [eu-g3-071]                  # known wedged nodes; probe/doctor may append discovered ones
+
+pools:
+  - name: gpu                                    # public Turing pool
+    node_globs: ["eu-lo-g2-*", "eu-lo-g3-*", "eu-g3-*"]
+    arch: sm_75
+    vram_g: 24                                   # NB eu-lo-g2 = 11G subset (only B2 fits)
+    qos_base: es_wicky/gpu
+    caps: {4h: 96, 24h: 50, 120h: 29, bulk: 240} # concurrent-GPU QOS caps
+    preempt_tiers: [bulk]
+
+  - name: gpuhe                                   # Ampere (eu-g4 sm_86) + Ada (eu-g6 sm_89), scarce
+    node_globs: ["eu-g4-*", "eu-g6-*"]
+    arch: sm_86
+    vram_g: 24
+    qos_base: es_wicky/gpuhe
+    caps: {4h: 96, 24h: 50, 120h: 29, bulk: 240}
+    preempt_tiers: [bulk]
+
+  - name: gpupr                                   # A100 (routes through gpuhe QOS)
+    node_globs: ["eu-a65-*", "eu-ts-*"]
+    arch: sm_80
+    vram_g: 80                                    # 40G subset also present
+    qos_base: es_wicky/gpuhe
+    caps: {24h: 50, 120h: 29, bulk: 240}
+    min_buffer: 5                                 # keep N queued to capture freed A100s
+
+  # eu-g7 = RTX PRO 6000 / sm_120 / 96G is UNUSABLE (containers cap sm_90). Documented, not a pool.

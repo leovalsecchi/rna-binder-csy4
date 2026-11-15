@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""CLI wrapper: aggregate metrics from a set of source runs into a CSV.
+
+Usage:
+    aggregate_metrics.py SRC_RUN [SRC_RUN ...] [--output FILE] [--structural] [--label LABEL]
+
+Examples:
+    aggregate_metrics.py \\
+      campaigns/csy4_crrna_free/rfd3__ligandmpnn/launchertest_b4ed9efe \\
+      campaigns/csy4_crrna_free/boltzgen__ligandmpnn/num10test_v2_c11f8952 \\
+      --output metrics.csv
+
+    aggregate_metrics.py campaigns/csy4_crrna_free/rfd3__ligandmpnn/launchertest_b4ed9efe \\
+      --label smoketest --structural --output metrics_full.csv
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("source_runs", nargs="+", type=Path,
+                    help="One or more design-run directories")
+    ap.add_argument("--output", "-o", type=Path, default=Path("aggregated_metrics.csv"),
+                    help="Output CSV path (default: aggregated_metrics.csv)")
+    ap.add_argument("--refolders", nargs="+", default=["AF3", "B2", "ESM"],
+                    choices=["AF3", "B2", "ESM"],
+                    help="Which refolders to include")
+    ap.add_argument("--label", action="append", default=None,
+                    help="Only include refold passes with this label (repeatable)")
+    ap.add_argument("--structural", action="store_true",
+                    help="Also compute biotite-based structural metrics (slow)")
+    ap.add_argument("--collapse", choices=["sample", "design"], default="sample",
+                    help="Granularity: one row per sample (default) or one row per design")
+    ap.add_argument("--collapse-agg", default="best",
+                    help="When --collapse=design: 'best', 'mean', or 'median' (default: best)")
+    ap.add_argument("--progress", action="store_true",
+                    help="Print one line per refold file processed")
+    args = ap.parse_args()
+
+    # Add the package's parent to sys.path so `rna_binder.analysis` resolves.
+    pkg_parent = Path(__file__).resolve().parents[1] / "src"
+    if pkg_parent.exists():
+        sys.path.insert(0, str(pkg_parent))
+
+    from rna_binder.analysis import aggregate_metrics, aggregate_to_designs
+
+    df = aggregate_metrics(
+        source_runs=args.source_runs,
+        refolders=tuple(args.refolders),
+        labels=args.label,
+        structural=args.structural,
+        progress=args.progress,
+    )
+
+    if df.empty:
+        print(f"No refold samples found across {len(args.source_runs)} source run(s).", file=sys.stderr)
+        return
+
+    if args.collapse == "design":
+        df = aggregate_to_designs(df, agg=args.collapse_agg)
+
+    df.to_csv(args.output, index=False)
+    print(f"Wrote {len(df)} rows × {len(df.columns)} cols to {args.output}")
+    print(f"Columns: {', '.join(df.columns)}")
+
+
+if __name__ == "__main__":
+    main()

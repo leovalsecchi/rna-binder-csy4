@@ -1,0 +1,19 @@
+# Example real campaign (mirrors midrun_v8: 4 non-HD stacks). Used to demo `campaign plan`
+# and parity-check against the hand-written submit_mv8 routing.
+name: midrun_v8
+target:
+  id: csy4_crrna_free
+  pdb: ${rb_root}/campaigns/csy4_crrna_free/csy4_rna_only.pdb
+  rna_sequence: ACUGCCGUAUAGGCAG
+stacks:
+  - {gen: rfd3,        inverse_fold: ligandmpnn, count: 90000, seed_base: 80001}
+  - {gen: boltzgen,    inverse_fold: boltzif,    count: 90000, seed_base: 80001}
+  - {gen: boltzgen,    inverse_fold: ligandmpnn, count: 90000, seed_base: 80001}
+  - {gen: boltzdesign, inverse_fold: ligandmpnn, count: 90000, seed_base: 80001}
+refold:
+  backends: [af3, b2, esm]
+  msa: off
+constraints:
+  omit_residues: [C]
+  auto_refold: true
+compat: euler.compat.yaml

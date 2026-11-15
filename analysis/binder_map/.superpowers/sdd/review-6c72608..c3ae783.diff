@@ -1,0 +1,274 @@
+# Review package: 6c72608..HEAD
+
+## Commits
+c3ae783 Scaffold binder_map package with real CIF fixtures
+
+## Files changed
+ .gitignore                             |   2 +
+ pyproject.toml                         |  15 +++++++
+ scripts/fetch_fixtures.py              |  80 +++++++++++++++++++++++++++++++++
+ src/binder_map/__init__.py             |  26 +++++++++++
+ tests/conftest.py                      |  47 +++++++++++++++++++
+ tests/fixtures/af3_refold.cif.gz       | Bin 0 -> 24003 bytes
+ tests/fixtures/bd1_design.cif.gz       | Bin 0 -> 11384 bytes
+ tests/fixtures/bgbif_design.cif.gz     | Bin 0 -> 27775 bytes
+ tests/fixtures/esm_refold.cif.gz       | Bin 0 -> 28286 bytes
+ tests/fixtures/rfd3_design.cif.gz      | Bin 0 -> 10168 bytes
+ tests/fixtures/rfd3_design_seq7.cif.gz | Bin 0 -> 10170 bytes
+ tests/test_constants.py                |  18 ++++++++
+ 12 files changed, 188 insertions(+)
+
+## Diff
+diff --git a/.gitignore b/.gitignore
+index 3166e72..7f5d38d 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,6 +1,8 @@
+ __pycache__/
+ *.pyc
+ dist/
+ results/
+ shards/
+ .DS_Store
++.superpowers/
++*.egg-info/
+diff --git a/pyproject.toml b/pyproject.toml
+new file mode 100644
+index 0000000..44f08f5
+--- /dev/null
++++ b/pyproject.toml
+@@ -0,0 +1,15 @@
++[project]
++name = "binder_map"
++version = "0.1.0"
++requires-python = ">=3.10"
++
++[build-system]
++requires = ["setuptools>=68"]
++build-backend = "setuptools.build_meta"
++
++[tool.setuptools.packages.find]
++where = ["src"]
++
++[tool.pytest.ini_options]
++testpaths = ["tests"]
++addopts = "-q"
+diff --git a/scripts/fetch_fixtures.py b/scripts/fetch_fixtures.py
+new file mode 100755
+index 0000000..8f084a0
+--- /dev/null
++++ b/scripts/fetch_fixtures.py
+@@ -0,0 +1,80 @@
++#!/usr/bin/env python3
++"""Pull a handful of real CIFs from Euler into tests/fixtures/.
++
++Picks structures that exercise the dialect and chain-order differences:
++  - RFD3+LiMPNN design  -> protein is chain B (inverted)
++  - BG+BIF design       -> different mmCIF dialect, 18-nt RNA
++  - BD1+LiMPNN design   -> protein is chain A
++  - one af3 refold, one esm refold
++Plus a second sequence variant of the RFD3 backbone, to test dedup.
++
++Run from the repo root:  python scripts/fetch_fixtures.py
++"""
++from __future__ import annotations
++
++import csv
++import gzip
++import subprocess
++import sys
++from pathlib import Path
++
++CSV = Path("/Users/leo/Documents/binder_filter/exports/passing.csv")
++OUT = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
++RB = "/cluster/work/wicky/lvalsecchi/rna_binder"
++
++# design_id -> (column, fixture name)
++WANTED = {
++    "csy4free_RFD3_LiMPNN_len80_0118c551_design45_seq4": ("design_cif", "rfd3_design"),
++    "csy4free_RFD3_LiMPNN_len80_0118c551_design45_seq7": ("design_cif", "rfd3_design_seq7"),
++    "csy4free_BG_BIF_len80_c55bf73f_design16_seq8": ("design_cif", "bgbif_design"),
++    "csy4free_BD1_LiMPNN_len80_031de1a0_design48_seq1": ("design_cif", "bd1_design"),
++    "csy4free_BD1_LiMPNN_len80_031de1a0_design48_seq1_af3": ("af3_cif", "af3_refold"),
++    "csy4free_BD1_LiMPNN_len80_031de1a0_design48_seq1_esm": ("esm_cif", "esm_refold"),
++}
++
++
++def rows_by_id(wanted_ids: set[str]) -> dict[str, dict]:
++    found: dict[str, dict] = {}
++    with CSV.open() as fh:
++        fh.readline()
++        fh.readline()
++        for row in csv.DictReader(fh):
++            if row["design_id"] in wanted_ids:
++                found[row["design_id"]] = row
++            if len(found) == len(wanted_ids):
++                break
++    return found
++
++
++def main() -> int:
++    OUT.mkdir(parents=True, exist_ok=True)
++    base_ids = {k.removesuffix("_af3").removesuffix("_esm") for k in WANTED}
++    rows = rows_by_id(base_ids)
++
++    missing = base_ids - rows.keys()
++    if missing:
++        print(f"FATAL: design_ids not in passing.csv: {sorted(missing)}", file=sys.stderr)
++        return 1
++
++    for key, (column, name) in WANTED.items():
++        design_id = key.removesuffix("_af3").removesuffix("_esm")
++        archive, member = rows[design_id][column].split("!", 1)
++        cmd = f"cd {RB} && tar --zstd -xOf {archive} {member}"
++        proc = subprocess.run(
++            ["ssh", "-o", "ConnectTimeout=60", "euler", cmd],
++            capture_output=True,
++        )
++        if proc.returncode != 0 or not proc.stdout.strip():
++            print(f"FATAL: could not fetch {name} ({design_id})", file=sys.stderr)
++            print(proc.stderr.decode()[:400], file=sys.stderr)
++            return 1
++        dest = OUT / f"{name}.cif.gz"
++        dest.write_bytes(gzip.compress(proc.stdout))
++        print(f"  {name:20s} {len(proc.stdout):>9,d} B -> {dest.name}")
++
++    print("fixtures written to", OUT)
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/src/binder_map/__init__.py b/src/binder_map/__init__.py
+new file mode 100644
+index 0000000..8a3a0c2
+--- /dev/null
++++ b/src/binder_map/__init__.py
+@@ -0,0 +1,26 @@
++"""Shared constants for the binder map pipeline.
++
++Values are pinned to match rna_binder.analysis.structural so that recomputed
++per-nucleotide contacts can be cross-checked against the stored
++rna_contact_nt_* columns.
++"""
++
++# The csy4 target RNA, 16 nt. This is the canonical epitope frame: every
++# fingerprint position refers to an index into this sequence.
++RNA_CANONICAL = "ACUGCCGUAUAGGCAG"
++RNA_LEN = 16
++
++# Angstroms, heavy-atom. Must equal rna_binder's RNA_CONTACT_CUTOFF or the
++# cross-check in Task 19 is meaningless.
++RNA_CONTACT_CUTOFF = 4.5
++
++# Every stochastic step (Leiden, UMAP) uses this.
++SEED = 42
++
++# Moieties the per-nucleotide contact counts are split across.
++MOIETIES = ("phosphate", "sugar", "base")
++
++# 16 nucleotides x 3 moieties
++FINGERPRINT_DIM = RNA_LEN * len(MOIETIES)
++
++assert len(RNA_CANONICAL) == RNA_LEN
+diff --git a/tests/conftest.py b/tests/conftest.py
+new file mode 100644
+index 0000000..c1ac3a5
+--- /dev/null
++++ b/tests/conftest.py
+@@ -0,0 +1,47 @@
++import gzip
++from pathlib import Path
++
++import pytest
++
++FIXTURES = Path(__file__).parent / "fixtures"
++
++
++def fixture_path(name: str) -> Path:
++    p = FIXTURES / f"{name}.cif.gz"
++    if not p.exists():
++        pytest.skip(f"fixture {name} missing; run scripts/fetch_fixtures.py")
++    return p
++
++
++def fixture_text(name: str) -> str:
++    return gzip.decompress(fixture_path(name).read_bytes()).decode()
++
++
++@pytest.fixture
++def rfd3_design() -> Path:
++    return fixture_path("rfd3_design")
++
++
++@pytest.fixture
++def rfd3_design_seq7() -> Path:
++    return fixture_path("rfd3_design_seq7")
++
++
++@pytest.fixture
++def bgbif_design() -> Path:
++    return fixture_path("bgbif_design")
++
++
++@pytest.fixture
++def bd1_design() -> Path:
++    return fixture_path("bd1_design")
++
++
++@pytest.fixture
++def af3_refold() -> Path:
++    return fixture_path("af3_refold")
++
++
++@pytest.fixture
++def esm_refold() -> Path:
++    return fixture_path("esm_refold")
+diff --git a/tests/fixtures/af3_refold.cif.gz b/tests/fixtures/af3_refold.cif.gz
+new file mode 100644
+index 0000000..32a55ce
+Binary files /dev/null and b/tests/fixtures/af3_refold.cif.gz differ
+diff --git a/tests/fixtures/bd1_design.cif.gz b/tests/fixtures/bd1_design.cif.gz
+new file mode 100644
+index 0000000..44fe006
+Binary files /dev/null and b/tests/fixtures/bd1_design.cif.gz differ
+diff --git a/tests/fixtures/bgbif_design.cif.gz b/tests/fixtures/bgbif_design.cif.gz
+new file mode 100644
+index 0000000..d2f4675
+Binary files /dev/null and b/tests/fixtures/bgbif_design.cif.gz differ
+diff --git a/tests/fixtures/esm_refold.cif.gz b/tests/fixtures/esm_refold.cif.gz
+new file mode 100644
+index 0000000..2a94c79
+Binary files /dev/null and b/tests/fixtures/esm_refold.cif.gz differ
+diff --git a/tests/fixtures/rfd3_design.cif.gz b/tests/fixtures/rfd3_design.cif.gz
+new file mode 100644
+index 0000000..fd861a6
+Binary files /dev/null and b/tests/fixtures/rfd3_design.cif.gz differ
+diff --git a/tests/fixtures/rfd3_design_seq7.cif.gz b/tests/fixtures/rfd3_design_seq7.cif.gz
+new file mode 100644
+index 0000000..a3fb15f
+Binary files /dev/null and b/tests/fixtures/rfd3_design_seq7.cif.gz differ
+diff --git a/tests/test_constants.py b/tests/test_constants.py
+new file mode 100644
+index 0000000..a3a82a8
+--- /dev/null
++++ b/tests/test_constants.py
+@@ -0,0 +1,18 @@
++from binder_map import (
++    RNA_CANONICAL, RNA_LEN, RNA_CONTACT_CUTOFF, FINGERPRINT_DIM, MOIETIES,
++)
++
++
++def test_canonical_rna_is_16nt():
++    assert len(RNA_CANONICAL) == RNA_LEN == 16
++    assert set(RNA_CANONICAL) <= {"A", "C", "G", "U"}
++
++
++def test_contact_cutoff_matches_rna_binder():
++    # rna_binder.analysis.structural.RNA_CONTACT_CUTOFF
++    assert RNA_CONTACT_CUTOFF == 4.5
++
++
++def test_fingerprint_dim():
++    assert MOIETIES == ("phosphate", "sugar", "base")
++    assert FINGERPRINT_DIM == 48

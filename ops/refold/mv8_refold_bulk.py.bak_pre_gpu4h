@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+# bif_cysregen_refold_bulk.py — auto-submit refolds for the cysteine-regenerated
+# BG+BIF slices, cloned from ops/refold/hd_refold_bulk.py (same placement + array
+# bucketing + idempotency). Differs from the HD version only in:
+#   * STACK = boltzgen__boltzif, RUN = cysregen label (default cysregen_2026-07-02)
+#   * no gen-inflight guard: bif_cysregen packs each slice ATOMICALLY (pack_slice),
+#     so a *.tar.zst appearing means that uuid is fully generated -> refoldable.
+#   * (unchanged) AF3 -> public gpu.24h/.120h eu-g3 Turing; ESM -> gpuhe.bulk;
+#     B2 -> gpu.bulk. These refolds also emit IPSAE sidecars now.
+#
+#   python3 bif_cysregen_refold_bulk.py [--run cysregen_2026-07-02] [--submit] [--limit N]
+import sys, subprocess, re, argparse, shutil, time
+from datetime import datetime
+from pathlib import Path
+
+RB = "/cluster/work/wicky/lvalsecchi/rna_binder"
+sys.path.insert(0, f"{RB}/code/scripts")
+import yaml
+import launch
+
+CAMP = Path(RB) / "campaigns" / "csy4_crrna_free"
+DEFAULT_RUN = "midrun_v8"
+
+# PUBLIC gpu.* Turing 24G pool (eu-g3), two node bins so gpu/24 (cap 50) and gpu/120
+# (cap 29) don't contend. See claude_memory rna-binder-public-gpu-pool-routing.
+POOL_A = "eu-g3-[062-070]"
+POOL_B = "eu-g3-[071-077],eu-g3-[083-084]"
+PLACE = {
+    "af3": [("gpu.24h", "es_wicky/gpu/24", "06:00:00", "eu-g3-[062-077,083-084]")],
+    "esm": [("gpu.120h", "es_wicky/gpu/120", "06:00:00", "eu-g3-[062-077,083-084]")],
+    "b2":  [("gpu.bulk",   "es_wicky/gpu/bulk",   "06:00:00", None)],
+}
+rr = {}
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--run", default=DEFAULT_RUN)
+ap.add_argument("--submit", action="store_true")
+ap.add_argument("--limit", type=int, default=0)
+ap.add_argument("--stack", default="boltzgen__boltzif")
+args = ap.parse_args()
+STACK = CAMP / args.stack
+
+
+def sh(*a):
+    return subprocess.run(a, capture_output=True, text=True)
+
+
+RUN = args.run
+POOL = STACK / RUN
+print(f"[bif_cysregen_refold] run={RUN}  pool={POOL}  exists={POOL.exists()}  submit={args.submit}")
+if not (POOL / "designs").is_dir():
+    print("  no designs/ dir yet -> nothing to do this pass")
+    sys.exit(0)
+
+# active refold run.sbatch paths (leaf handled = has a live job) — individual jobs
+# and array tasks (whose squeue %o is the array's *.sbatch).
+# --- consolidation: cancel our OWN still-pending arrays from the previous tick so their
+# designs re-enter `todo` and get re-bucketed into a few big arrays. Without this, each
+# tick leaves a fresh micro-array pending -> hundreds accumulate and flood the 250-deep
+# scheduler window (low-prio bulk refolds then starve while GPUs sit idle). Scoped by a
+# per-(submitter,run) job-id state file so we never cancel the sibling loop's arrays even
+# when they share this pool (HD) or the rf<name>_<run> job-name.
+_CONS_STATE = POOL / f".refold_consolidate.main.{RUN}.jobids"
+if args.submit and _CONS_STATE.exists():
+    _old = [x for x in _CONS_STATE.read_text().split() if x.isdigit()]
+    if _old:
+        sh("scancel", "--state=PENDING", *_old)
+        time.sleep(5)  # let the controller reflect the cancel before reading squeue
+
+active_sb = set()
+for line in sh("squeue", "-u", "lvalsecchi", "-h", "-o", "%o").stdout.splitlines():
+    s = line.strip()
+    if s:
+        active_sb.add(s)
+
+# Array-aware idempotency: read each live array's inline SCRIPTS=() (or sibling
+# manifest.txt) to collect the leaf run.sbatch paths it covers, so we never double
+# submit or rmtree a leaf mid-refold.
+active_leaves = set()
+for o in active_sb:
+    if not o.endswith(".sbatch"):
+        continue
+    try:
+        txt = Path(o).read_text()
+    except OSError:
+        continue
+    m = re.search(r"SCRIPTS=\((.*?)\n\)", txt, re.DOTALL)
+    if m:
+        for ln in m.group(1).splitlines():
+            if ln.strip():
+                active_leaves.add(ln.strip())
+    elif o.endswith("/array.sbatch"):
+        man = Path(o).parent / "manifest.txt"
+        try:
+            for ln in man.read_text().splitlines():
+                if ln.strip():
+                    active_leaves.add(ln.strip())
+        except OSError:
+            pass
+
+# finished = packed slices (pack_slice is atomic -> a slice present == fully generated)
+finished = []
+for f in sorted((POOL / "designs").glob("*.tar.zst")):
+    u = f.name.split(".")[0]
+    if re.fullmatch(r"[0-9a-f]{8}", u):
+        finished.append(u)
+
+
+def leaf_handled(rdir):
+    sbp = str(rdir / "run.sbatch")
+    return ((rdir / "designs.tar.zst").exists()
+            or sbp in active_sb or sbp in active_leaves)
+
+
+def needs_work(u):
+    return not all(leaf_handled(POOL / f"refold_{k}" / f"msaoff_{u}") for k in ("af3", "b2", "esm"))
+
+
+todo = [u for u in finished if needs_work(u)]
+if args.limit:
+    todo = todo[: args.limit]
+print(f"  finished uuids={len(finished)}  needing-work={len(todo)}")
+
+nsub = nmoved = 0
+log = []
+buckets = {}  # (part,qos,wall,nodelist) -> {"rname","sb","leaves":[(rdir, run.sbatch)]}
+for u in todo:
+    for rname, rdir, rcfg, sb in launch._build_refold_jobs(
+        [POOL], RUN, "0", None, designs_filter=u, leaf_suffix=f"_{u}"
+    ):
+        if leaf_handled(rdir):
+            log.append(f"{u} {rname} OK(done/active)")
+            continue
+        places = PLACE[rname]
+        idx = rr.get(rname, 0); rr[rname] = idx + 1
+        part, qos, wall, nodelist = places[idx % len(places)]
+
+        sb = sb.replace("#SBATCH --dependency=afterok:0\n", "")
+        sb = re.sub(r"#SBATCH --signal=\S+\n", "", sb)
+        sb = re.sub(r"#SBATCH --nodelist=.*\n", "", sb)
+        if nodelist:
+            sb = re.sub(r"#SBATCH --partition=\S+", f"#SBATCH --partition={part}", sb)
+            sb = re.sub(r"#SBATCH --gres=gpumem:\S+", "#SBATCH --gres=gpu:1", sb)
+            sb = re.sub(r"(#SBATCH --partition=[^\n]*\n)", rf"\1#SBATCH --nodelist={nodelist}\n", sb, count=1)
+        elif part.endswith(".bulk") and wall:
+            # base sbatch is gpu.4h (MaxTime 4h, rejects >4h); gpu.bulk MaxTime=15d +
+            # AllowQos=ALL -> bake partition+qos and submit directly at the longer walltime.
+            sb = re.sub(r"#SBATCH --partition=\S+", f"#SBATCH --partition={part}", sb)
+            if re.search(r"#SBATCH --qos=", sb):
+                sb = re.sub(r"#SBATCH --qos=\S+", f"#SBATCH --qos={qos}", sb)
+            else:
+                sb = re.sub(r"(#SBATCH --partition=[^\n]*\n)", rf"\1#SBATCH --qos={qos}\n", sb, count=1)
+        if wall:
+            sb = re.sub(r"#SBATCH --time=\S+", f"#SBATCH --time={wall}", sb)
+        if "--requeue" not in sb:
+            sb = re.sub(r"(#SBATCH --partition=[^\n]*\n)", r"\1#SBATCH --requeue\n", sb, count=1)
+
+        # node-local scratch worker + node-local disk request (no Lustre inode blowup)
+        sb = re.sub(r"(refold_(?:af3|b2|esm))\.sh", r"\1_scratch.sh", sb)
+        if "--tmp=" not in sb:
+            sb = re.sub(r"(#SBATCH --partition=[^\n]*\n)", r"\1#SBATCH --tmp=30G\n", sb, count=1)
+        if "--exclude=" not in sb:
+            sb = re.sub(r"(#SBATCH --partition=[^\n]*\n)", r"\1#SBATCH --exclude=eu-lo-g2-028,eu-lo-g3-059,eu-g6-064\n", sb, count=1)
+
+        b = buckets.setdefault((part, qos, wall, nodelist),
+                               {"rname": rname, "sb": sb, "leaves": []})
+        if not args.submit:
+            log.append(f"{u} {rname} would-submit -> {part}" + (f"  -w {nodelist}" if nodelist else ""))
+            b["leaves"].append((rdir, rdir / "run.sbatch"))
+            continue
+        if rdir.exists():
+            shutil.rmtree(rdir, ignore_errors=True)
+        rdir.mkdir(parents=True, exist_ok=True)
+        (rdir / "resolved_config.yaml").write_text(yaml.dump(rcfg))
+        p = rdir / "run.sbatch"
+        p.write_text(sb)
+        p.chmod(0o755)
+        b["leaves"].append((rdir, p))
+
+TS = datetime.now().strftime("%Y%m%d_%H%M%S")
+ARRROOT = POOL / "_refold_arrays"
+# split each routing bucket into <=CHUNK-task arrays so no single array exceeds
+# Slurm MaxArraySize (15000); still a handful of BIG arrays, never micro-arrays.
+CHUNK = 10000
+_jobs = []
+for _sig, _b in buckets.items():
+    _lv = _b["leaves"]
+    for _ci in range(0, len(_lv), CHUNK):
+        _jobs.append((_sig, _b, _lv[_ci:_ci + CHUNK], _ci // CHUNK))
+_sub_jids = []
+for (part, qos, wall, nodelist), b, leaves, _cix in _jobs:
+    rname = b["rname"]
+    n = len(leaves)
+    if not args.submit:
+        log.append(f"  [array] {rname} -> {part}{(' -w ' + nodelist) if nodelist else ''}: {n} task(s)")
+        continue
+    adir = ARRROOT / f"{rname}_{re.sub(r'[^A-Za-z0-9]', '_', part)}_{TS}_{_cix}"
+    adir.mkdir(parents=True, exist_ok=True)
+    (adir / "array_logs").mkdir(exist_ok=True)
+    manifest = adir / "manifest.txt"
+    manifest.write_text("".join(f"{p}\n" for _rd, p in leaves))
+    header_part = b["sb"].split("\nset -euo pipefail", 1)[0]
+    hdr = [ln for ln in header_part.splitlines()
+           if ln.startswith("#SBATCH ")
+           and not ln.startswith(("#SBATCH --job-name",
+                                  "#SBATCH --output", "#SBATCH --error"))]
+    scripts = "\n".join(f"  {p}" for _rd, p in leaves)
+    arr = (
+        "#!/bin/bash\n"
+        f"#SBATCH --job-name=rf{rname}_{RUN}\n"
+        + "\n".join(hdr) + "\n"
+        f"#SBATCH --array=0-{n - 1}%200\n"
+        f"#SBATCH --output={adir}/array_logs/%A_%a.log\n"
+        f"#SBATCH --error={adir}/array_logs/%A_%a.err\n\n"
+        "set -euo pipefail\n"
+        f"SCRIPTS=(\n{scripts}\n)\n"
+        'S="${SCRIPTS[$SLURM_ARRAY_TASK_ID]}"\n'
+        'RUNDIR=$(dirname "$S")\n'
+        'echo "[refold-array] task=$SLURM_ARRAY_TASK_ID host=$(hostname) -> $S"\n'
+        'bash "$S" > "$RUNDIR/slurm.log" 2> "$RUNDIR/slurm.err"\n'
+    )
+    ap_ = adir / "array.sbatch"
+    ap_.write_text(arr)
+    ap_.chmod(0o755)
+    res = sh("sbatch", "--parsable", str(ap_))
+    jid = res.stdout.strip().split(";")[0]
+    if not jid.isdigit():
+        log.append(f"[array] {rname} {part} SUBMIT_ERR {res.stderr.strip()[:120]}")
+        continue
+    nsub += n
+    _sub_jids.append(jid)
+    mv = sh("scontrol", "update", f"jobid={jid}", f"partition={part}", f"qos={qos}")
+    if mv.returncode == 0:
+        nmoved += n
+        log.append(f"[array] {rname} jid={jid} ({n} tasks) -> {part}")
+    else:
+        log.append(f"[array] {rname} jid={jid} ({n} tasks) MOVE_FAIL {mv.stderr.strip()[:100]}")
+
+if args.submit:
+    _CONS_STATE.write_text("\n".join(_sub_jids) + ("\n" if _sub_jids else ""))
+print(f"  submitted={nsub}  arrays={len(buckets)}")
+if args.submit:
+    with open(POOL / "_bif_cysregen_refold.log", "a") as fh:
+        fh.write("\n".join(log) + "\n")
+    print(f"  log -> {POOL/'_bif_cysregen_refold.log'}")
+else:
+    for line in log[:20]:
+        print("   ", line)
+    print("  DRY-RUN — add --submit to fire.")

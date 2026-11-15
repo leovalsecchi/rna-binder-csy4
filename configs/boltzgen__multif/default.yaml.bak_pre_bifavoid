@@ -1,0 +1,89 @@
+# BoltzGen multi-inverse-fold meta config for csy4_crrna_free.
+#
+# Runs BoltzGen design step ONCE, then runs BOTH inverse folders (BIF and
+# LigandMPNN) on the SAME backbone. This lets you compare the two inverse
+# folders' outputs directly since the backbone is identical.
+#
+# Output layout (3 dirs, all sharing the same uuid8):
+#   campaigns/<target>/_backbones/BG_len<N>_<uuid8>/      (the shared backbone)
+#   campaigns/<target>/boltzgen__boltzif/<label>_<uuid8>/ (BIF sequences)
+#   campaigns/<target>/boltzgen__ligandmpnn/<label>_<uuid8>/ (LiMPNN sequences)
+#
+# Launch:
+#   python3 code/scripts/launch.py code/configs/boltzgen__multif/default.yaml \
+#       --label test [--override generator_params.bg_cli.num_designs=10] ...
+
+target_id: csy4_crrna_free
+generator: boltzgen
+inverse_folders: [boltzif, ligandmpnn]    # plural → meta config
+config_kind: multif                        # explicit marker
+config_name: default
+
+slurm:
+  job_name: bg_multif
+  partition: gpuhe.24h
+  time: "23:30:00"
+  cpus_per_task: 4
+  mem_per_cpu: "16G"
+  gpus: "rtx_4090:1"
+
+container:
+  # BoltzGen container (for design + BIF stages)
+  boltzgen_sif: /cluster/work/wicky/containers/boltzgen.sif
+  boltzgen_home: /cluster/work/wicky/lvalsecchi/rna_binder/_cache/boltzgen_sif/home
+  boltzgen_envs:
+    HF_HOME: /cluster/work/wicky/lvalsecchi/rna_binder/_cache/boltzgen_sif/hf
+    HUGGINGFACE_HUB_CACHE: /cluster/work/wicky/lvalsecchi/rna_binder/_cache/boltzgen_sif/hf
+    HF_HUB_OFFLINE: "1"
+    TRANSFORMERS_OFFLINE: "1"
+    XDG_CACHE_HOME: /cluster/work/wicky/lvalsecchi/rna_binder/_cache/boltzgen_sif/xdg
+    MPLCONFIGDIR: /cluster/work/wicky/lvalsecchi/rna_binder/_cache/boltzgen_sif/mpl
+    TMPDIR: /cluster/work/wicky/lvalsecchi/rna_binder/_cache/boltzgen_sif/tmp
+
+  # LigandMPNN container (for the LiMPNN stage)
+  ligandmpnn_sif: /cluster/work/wicky/containers/LigandMPNN.sif
+  ligandmpnn_weights: /cluster/work/wicky/params/foundry/ligandmpnn_v_32_010_25.pt
+
+generator_params:
+  # BoltzGen design spec
+  spec:
+    entities:
+      - protein:
+          id: D
+          sequence: 80
+      - file:
+          path: csy4_rna_only.pdb         # relative to spec.yaml location at runtime
+          include:
+            - chain:
+                id: B
+
+  # BoltzGen design CLI flags
+  bg_cli:
+    protocol: protein-anything
+    num_designs: 60
+    diffusion_batch_size: 1
+
+  # BoltzGen inverse-folding CLI flags (BIF stage)
+  bif_cli:
+    inverse_fold_num_sequences: 10         # per backbone
+
+  # LigandMPNN CLI flags
+  mpnn_cli:
+    chains_to_design: A                   # after CIF→PDB conversion, protein becomes chain A
+    batch_size: 10
+    number_of_batches: 1                  # total seqs = batch_size × number_of_batches
+    temperature: 0.1
+    seed: 42
+    omit_AA: C
+
+# Notes:
+# - The launcher creates THREE run dirs sharing the same uuid8: the backbone set
+#   under _backbones/, and the two stack dirs.
+# - Each stack dir's run_meta.json cross-references the other and the backbone set.
+# - The shared backbone is at _backbones/BG_len<N>_<uuid>/spec.{cif,pdb}.
+#   The .pdb is the converted version that LigandMPNN consumes.
+# - Length is derived from generator_params.spec.entities[0].protein.sequence.
+
+# Default outputs:
+#   BIF:    4 sequences per backbone (configurable via bif_cli.inverse_fold_num_sequences)
+#   LiMPNN: 4 sequences per backbone (batch_size × number_of_batches)

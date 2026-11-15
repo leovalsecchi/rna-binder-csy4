@@ -1,0 +1,30 @@
+# EXAMPLE gen model — RFdiffusion3.
+name: rfd3
+kind: gen
+container:
+  sif: ${shared}/containers/foundry.sif        # RFD3 runs via Foundry's `frun`, not a bare apptainer call
+  apptainer_cmd: run
+  nv: true
+  binds: ["${shared}:${shared}"]
+  envs: {}
+entrypoint: "frun rfd3 design"
+# Real RFD3 invocation (from code/scripts/stages/rfd3_multif.sh): source the Foundry
+# activate script, cd to the examples dir, run `frun rfd3 design ...` with the JSON input.
+# n_batches/diffusion_batch_size default to 1 (a single backbone) for a cold-probe;
+# a production wire can export CK_N_BATCHES / CK_DBS.
+run_contract: 'source ${shared}/${user}/rfdiffusion3/activate/foundry.activate.sh && cd ${shared}/${user}/rfdiffusion3/examples/rna && frun rfd3 design out_dir="$CK_OUT" inputs=csy4_crrna.json n_batches=${CK_N_BATCHES:-1} diffusion_batch_size=${CK_DBS:-1} prevalidate_inputs=true skip_existing=false'
+params:
+  diffusion_batch_size: 8
+flag_style: {boolean_flags: [], render: "--{key} {value}"}
+per_unit_seed: true
+io:
+  needs: [target_pdb]
+  emits: designs/
+  units_per_job: 595
+compat_hints:
+  min_arch: sm_75              # arch-agnostic (fastest gen, ~0.4h)
+  vram_g: null
+  sec_per_unit: null
+probe:
+  jobname_match: "(_rfd3|rfd3)"
+  calib_params: {diffusion_batch_size: 1}   # tiny override for a fast cold-probe

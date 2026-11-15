@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# job_summary.sh — summary of my current Slurm jobs by stack + role.
+#   role = generation (rfd3/bd1/bg/hd) OR refolder (af3-msaoff / af3-msaon / b2)
+#   columns: RUN(ning) / PEND(ing, schedulable) / HELD (scontrol hold) / OTH(er)
+# usage: bash job_summary.sh [user]      (default user: lvalsecchi)
+set -u
+U="${1:-lvalsecchi}"
+JOBS="$(scontrol show job -o 2>/dev/null | grep "UserId=${U}")"
+if [ -z "$JOBS" ]; then echo "No jobs for ${U}."; exit 0; fi
+
+echo "JOB SUMMARY — ${U} — $(date '+%Y-%m-%d %H:%M')"
+echo
+
+ROWS="$(printf '%s\n' "$JOBS" | awk '
+function ss(s){
+  if(s=="rfd3__ligandmpnn")return "rfd3";
+  if(s=="boltzdesign__ligandmpnn")return "boltzdesign";
+  if(s=="boltzgen__boltzif")return "bg_boltzif";
+  if(s=="boltzgen__ligandmpnn")return "bg_limpnn";
+  if(s=="halludesign__ligandmpnn")return "halludesign";
+  return s;
+}
+{
+  jn=js=rs=so="";
+  for(i=1;i<=NF;i++){ t=$i;
+    if(t ~ /^JobName=/) jn=substr(t,9);
+    else if(t ~ /^JobState=/) js=substr(t,10);
+    else if(t ~ /^Reason=/) rs=substr(t,8);
+    else if(t ~ /^StdOut=/) so=substr(t,8);
+  }
+  stack="?";
+  if(match(so,"csy4_crrna_free/[^/]+")) stack=ss(substr(so,RSTART+16,RLENGTH-16));
+  if(jn ~ /refold_af3/){ kind="refold"; role=(index(so,"/msaon_")?"af3-msaon":"af3-msaoff"); }
+  else if(jn ~ /refold_b2/){ kind="refold"; role="b2"; }
+  else { kind="gen";
+    if(jn ~ /rfd3/){role="rfd3_multif"; stack="rfd3";}
+    else if(jn ~ /bd1/){role="bd1_multif"; stack="boltzdesign";}
+    else if(jn ~ /bg_multif/){role="bg_multif"; stack="boltzgen";}
+    else if(jn ~ /^hd/){role="hd_gen"; stack="halludesign";}
+    else {role=jn;}
+  }
+  if(js=="RUNNING") b="RUN"; else if(js=="PENDING"&&rs=="JobHeldUser") b="HELD"; else if(js=="PENDING") b="PEND"; else b="OTH";
+  g=kind"|"stack"|"role;
+  R[g]+=(b=="RUN"); P[g]+=(b=="PEND"); H[g]+=(b=="HELD"); O[g]+=(b=="OTH"); seen[g]=1;
+}
+END{ for(g in seen) print g"|"R[g]+0"|"P[g]+0"|"H[g]+0"|"O[g]+0; }
+' | sort -t'|' -k1,1 -k2,2 -k3,3)"
+
+{ echo "KIND|STACK|ROLE|RUN|PEND|HELD|OTH"; printf '%s\n' "$ROWS"; } | column -t -s'|'
+
+echo
+printf '%s\n' "$ROWS" | awk -F'|' '{r+=$4;p+=$5;h+=$6;o+=$7} END{printf "TOTAL: RUN=%d  PEND=%d  HELD=%d  OTH=%d  (jobs=%d)\n", r,p,h,o, r+p+h+o}'
+
+echo
+echo "By partition:"
+printf '%s\n' "$JOBS" | awk '{
+  part="?"; state="";
+  for(i=1;i<=NF;i++){ if($i~/^Partition=/)part=substr($i,11); else if($i~/^JobState=/)state=substr($i,10); }
+  printf "  %-18s %s\n", part, state;
+}' | sort | uniq -c | sort -rn

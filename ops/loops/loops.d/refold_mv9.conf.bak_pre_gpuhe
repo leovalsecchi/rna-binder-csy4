@@ -1,0 +1,12 @@
+# refold loop for midrun_v9 — 4 non-HD stacks (HD handled by hd_v9). Clone of refold_mv8.conf.
+NAME=refold_mv9
+RUN=midrun_v9
+BULK="$RB/ops/refold/mv8_refold_bulk.py"
+STACKS="rfd3__ligandmpnn boltzgen__boltzif boltzgen__ligandmpnn boltzdesign__ligandmpnn"
+WORKER='for st in $STACKS; do echo "-- $st --"; python3 "$BULK" --run "$RUN" --stack "$st" --submit; done'
+INTERVAL=600
+END_MARGIN=12600
+CPUS=1
+REQUEUE=1
+AUTOSTOP_EMPTY=0
+ENABLED_FILE=

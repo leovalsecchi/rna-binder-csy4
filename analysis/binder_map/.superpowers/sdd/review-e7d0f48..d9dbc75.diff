@@ -1,0 +1,311 @@
+# Review package: e7d0f48..HEAD
+
+## Commits
+d9dbc75 Give disconnected embedding nodes finite ring coordinates
+39de7a1 Handle fully disconnected nodes in embedding instead of emitting NaN
+780007e Add UMAP embedding over the precomputed layout kNN
+
+## Files changed
+ .../plans/2026-08-21-foldseek-binder-map.md        |  65 ++++++++++++-
+ src/binder_map/embedding.py                        | 102 +++++++++++++++++++++
+ tests/test_embedding.py                            |  59 ++++++++++++
+ 3 files changed, 223 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/docs/superpowers/plans/2026-08-21-foldseek-binder-map.md b/docs/superpowers/plans/2026-08-21-foldseek-binder-map.md
+index 3540c22..defb382 100644
+--- a/docs/superpowers/plans/2026-08-21-foldseek-binder-map.md
++++ b/docs/superpowers/plans/2026-08-21-foldseek-binder-map.md
+@@ -2174,20 +2174,41 @@ def test_embed_returns_2d_coordinates():
+ 
+ 
+ def test_embed_is_deterministic():
+     v = _two_blobs()
+     res = knn_from_vectors(v, k=5, floor=0.5)
+     a = embed(len(v), res.layout_edges, res.layout_weights, k=5)
+     b = embed(len(v), res.layout_edges, res.layout_weights, k=5)
+     np.testing.assert_allclose(a, b)
+ 
+ 
++def test_node_with_no_neighbours_gets_finite_coordinates():
++    """A fully disconnected node must land somewhere, not become NaN.
++
++    UMAP returns NaN for such a row. Reachable in production because
++    symmetrise_min drops self-hits, so a structure whose only search hit is
++    itself arrives with zero edges. A NaN would silently drop the point from
++    the published map, and an outlier is exactly what an exploratory map most
++    needs to show.
++    """
++    # nodes 0..3 form a connected block; node 4 has no edges at all.
++    edges = np.array([[0, 1], [1, 2], [2, 3], [0, 3]])
++    weights = np.ones(len(edges), dtype=np.float32)
++    xy = embed(5, edges, weights, k=2)
++    assert xy.shape == (5, 2)
++    assert np.isfinite(xy).all(), "disconnected node produced NaN"
++    # and it must sit outside the connected cloud, not on top of it
++    centre = xy[:4].mean(axis=0)
++    spread = float(np.abs(xy[:4] - centre).max())
++    assert np.abs(xy[4] - centre).max() >= spread
++
++
+ def test_embed_keeps_distinct_groups_apart():
+     """Two well-separated groups should not be interleaved in the layout."""
+     v = _two_blobs()
+     res = knn_from_vectors(v, k=5, floor=0.5)
+     xy = embed(len(v), res.layout_edges, res.layout_weights, k=5)
+     half = len(v) // 2
+     ca, cb = xy[:half].mean(axis=0), xy[half:].mean(axis=0)
+     spread = max(xy[:half].std(axis=0).mean(), xy[half:].std(axis=0).mean())
+     assert np.linalg.norm(ca - cb) > spread
+ ```
+@@ -2245,36 +2266,74 @@ def _to_dense_knn(n: int, edges, weights, k: int):
+             row.append((other, 1.0 - w))
+             if len(row) == k:
+                 break
+         while len(row) < k:
+             row.append((node, 1.0))
+         idx[node] = [r[0] for r in row]
+         dist[node] = [r[1] for r in row]
+     return idx, dist
+ 
+ 
++def _ring_positions(count: int, centre, radius: float) -> np.ndarray:
++    """`count` points evenly spaced on a circle, in deterministic order."""
++    angles = np.linspace(0.0, 2.0 * np.pi, count, endpoint=False)
++    return np.stack([
++        centre[0] + radius * np.cos(angles),
++        centre[1] + radius * np.sin(angles),
++    ], axis=1).astype(np.float32)
++
++
+ def embed(n: int, layout_edges, layout_weights, k: int = 15,
+           seed: int = SEED) -> np.ndarray:
+-    """Return (n, 2) float32 UMAP coordinates."""
++    """Return (n, 2) float32 UMAP coordinates.
++
++    Nodes with NO real neighbour are handled explicitly. UMAP calls such a row
++    "fully disconnected" and returns NaN for it, and a NaN would drop the point
++    silently out of the published map. That case is reachable: `symmetrise_min`
++    discards self-hits, so a structure whose only search hit is itself arrives
++    here with zero edges. On an exploratory map that design is an outlier -
++    the single most interesting thing a point can be - so it is placed
++    deterministically on a ring outside the embedded cloud rather than
++    discarded or left as NaN.
++    """
++    edges = np.asarray(layout_edges).reshape(-1, 2)
++    connected = np.zeros(n, dtype=bool)
++    if len(edges):
++        connected[edges.ravel()] = True
++    n_lonely = int((~connected).sum())
++
+     idx, dist = _to_dense_knn(n, layout_edges, layout_weights, k)
+     reducer = umap.UMAP(
+         n_neighbors=k,
+         min_dist=0.1,
+         n_components=2,
+         metric="precomputed",
+         precomputed_knn=(idx, dist),
+         random_state=seed,
+         verbose=False,
+     )
+     # UMAP still wants an X of the right length when a precomputed knn is given.
+-    xy = reducer.fit_transform(np.zeros((n, 1), dtype=np.float32))
+-    return np.asarray(xy, dtype=np.float32)
++    xy = np.asarray(reducer.fit_transform(np.zeros((n, 1), dtype=np.float32)),
++                    dtype=np.float32)
++
++    if n_lonely:
++        good = xy[connected]
++        if len(good) == 0:                      # nothing connected at all
++            centre, radius = np.zeros(2, dtype=np.float32), 1.0
++        else:
++            centre = good.mean(axis=0)
++            radius = float(np.abs(good - centre).max()) * 1.15 or 1.0
++        xy[~connected] = _ring_positions(n_lonely, centre, radius)
++
++    if not np.isfinite(xy).all():
++        raise ValueError("embedding produced non-finite coordinates")
++    return xy
+ ```
+ 
+ - [ ] **Step 4: Run the tests**
+ 
+ ```bash
+ cd /Users/leo/Documents/binder_map
+ /Users/leo/.venvs/binder_map/bin/python -m pytest tests/test_embedding.py -v
+ ```
+ 
+ Expected: 3 passed.
+diff --git a/src/binder_map/embedding.py b/src/binder_map/embedding.py
+new file mode 100644
+index 0000000..2453dfc
+--- /dev/null
++++ b/src/binder_map/embedding.py
+@@ -0,0 +1,102 @@
++"""2D layout via UMAP over the precomputed layout kNN.
++
++Screen distance is illustrative only. Cluster membership and similarity are
++defined by the graph and the exact scores, never inferred from coordinates.
++"""
++from __future__ import annotations
++
++import numpy as np
++import umap
++
++from binder_map import SEED
++
++
++def _to_dense_knn(n: int, edges, weights, k: int):
++    """Build the (indices, distances) pair UMAP's precomputed_knn expects.
++
++    Distance is 1 - similarity. Nodes with fewer than k observed neighbours
++    are padded with self-references at maximum distance, which UMAP treats as
++    non-informative rather than as a fabricated edge.
++    """
++    edges = np.asarray(edges).reshape(-1, 2)
++    weights = np.asarray(weights, dtype=np.float32).ravel()
++
++    neighbours: list[list[tuple[float, int]]] = [[] for _ in range(n)]
++    for (a, b), w in zip(edges, weights):
++        neighbours[int(a)].append((float(w), int(b)))
++        neighbours[int(b)].append((float(w), int(a)))
++
++    idx = np.zeros((n, k), dtype=np.int32)
++    dist = np.ones((n, k), dtype=np.float32)
++    for node, nbrs in enumerate(neighbours):
++        nbrs.sort(key=lambda t: -t[0])
++        seen: set[int] = set()
++        row = []
++        for w, other in nbrs:
++            if other in seen or other == node:
++                continue
++            seen.add(other)
++            row.append((other, 1.0 - w))
++            if len(row) == k:
++                break
++        while len(row) < k:
++            row.append((node, 1.0))
++        idx[node] = [r[0] for r in row]
++        dist[node] = [r[1] for r in row]
++    return idx, dist
++
++
++def _ring_positions(count: int, centre, radius: float) -> np.ndarray:
++    """`count` points evenly spaced on a circle, in deterministic order."""
++    angles = np.linspace(0.0, 2.0 * np.pi, count, endpoint=False)
++    return np.stack([
++        centre[0] + radius * np.cos(angles),
++        centre[1] + radius * np.sin(angles),
++    ], axis=1).astype(np.float32)
++
++
++def embed(n: int, layout_edges, layout_weights, k: int = 15,
++          seed: int = SEED) -> np.ndarray:
++    """Return (n, 2) float32 UMAP coordinates.
++
++    Nodes with NO real neighbour are handled explicitly. UMAP calls such a row
++    "fully disconnected" and returns NaN for it, and a NaN would drop the point
++    silently out of the published map. That case is reachable: `symmetrise_min`
++    discards self-hits, so a structure whose only search hit is itself arrives
++    here with zero edges. On an exploratory map that design is an outlier -
++    the single most interesting thing a point can be - so it is placed
++    deterministically on a ring outside the embedded cloud rather than
++    discarded or left as NaN.
++    """
++    edges = np.asarray(layout_edges).reshape(-1, 2)
++    connected = np.zeros(n, dtype=bool)
++    if len(edges):
++        connected[edges.ravel()] = True
++    n_lonely = int((~connected).sum())
++
++    idx, dist = _to_dense_knn(n, layout_edges, layout_weights, k)
++    reducer = umap.UMAP(
++        n_neighbors=k,
++        min_dist=0.1,
++        n_components=2,
++        metric="precomputed",
++        precomputed_knn=(idx, dist),
++        random_state=seed,
++        verbose=False,
++    )
++    # UMAP still wants an X of the right length when a precomputed knn is given.
++    xy = np.asarray(reducer.fit_transform(np.zeros((n, 1), dtype=np.float32)),
++                    dtype=np.float32)
++
++    if n_lonely:
++        good = xy[connected]
++        if len(good) == 0:                      # nothing connected at all
++            centre, radius = np.zeros(2, dtype=np.float32), 1.0
++        else:
++            centre = good.mean(axis=0)
++            radius = float(np.abs(good - centre).max()) * 1.15 or 1.0
++        xy[~connected] = _ring_positions(n_lonely, centre, radius)
++
++    if not np.isfinite(xy).all():
++        raise ValueError("embedding produced non-finite coordinates")
++    return xy
+diff --git a/tests/test_embedding.py b/tests/test_embedding.py
+new file mode 100644
+index 0000000..273af85
+--- /dev/null
++++ b/tests/test_embedding.py
+@@ -0,0 +1,59 @@
++import numpy as np
++
++from binder_map.embedding import embed
++from binder_map.knn import knn_from_vectors
++
++
++def _two_blobs(seed=0, n=60):
++    rng = np.random.default_rng(seed)
++    a = rng.normal(0.0, 0.05, size=(n // 2, 6)) + np.array([1, 0, 0, 0, 0, 0])
++    b = rng.normal(0.0, 0.05, size=(n // 2, 6)) + np.array([0, 0, 0, 0, 0, 1])
++    return np.abs(np.vstack([a, b]))
++
++
++def test_embed_returns_2d_coordinates():
++    v = _two_blobs()
++    res = knn_from_vectors(v, k=5, floor=0.5)
++    xy = embed(len(v), res.layout_edges, res.layout_weights, k=5)
++    assert xy.shape == (len(v), 2)
++    assert np.isfinite(xy).all()
++
++
++def test_embed_is_deterministic():
++    v = _two_blobs()
++    res = knn_from_vectors(v, k=5, floor=0.5)
++    a = embed(len(v), res.layout_edges, res.layout_weights, k=5)
++    b = embed(len(v), res.layout_edges, res.layout_weights, k=5)
++    np.testing.assert_allclose(a, b)
++
++
++def test_node_with_no_neighbours_gets_finite_coordinates():
++    """A fully disconnected node must land somewhere, not become NaN.
++
++    UMAP returns NaN for such a row. Reachable in production because
++    symmetrise_min drops self-hits, so a structure whose only search hit is
++    itself arrives with zero edges. A NaN would silently drop the point from
++    the published map, and an outlier is exactly what an exploratory map most
++    needs to show.
++    """
++    # nodes 0..3 form a connected block; node 4 has no edges at all.
++    edges = np.array([[0, 1], [1, 2], [2, 3], [0, 3]])
++    weights = np.ones(len(edges), dtype=np.float32)
++    xy = embed(5, edges, weights, k=2)
++    assert xy.shape == (5, 2)
++    assert np.isfinite(xy).all(), "disconnected node produced NaN"
++    # and it must sit outside the connected cloud, not on top of it
++    centre = xy[:4].mean(axis=0)
++    spread = float(np.abs(xy[:4] - centre).max())
++    assert np.abs(xy[4] - centre).max() >= spread
++
++
++def test_embed_keeps_distinct_groups_apart():
++    """Two well-separated groups should not be interleaved in the layout."""
++    v = _two_blobs()
++    res = knn_from_vectors(v, k=5, floor=0.5)
++    xy = embed(len(v), res.layout_edges, res.layout_weights, k=5)
++    half = len(v) // 2
++    ca, cb = xy[:half].mean(axis=0), xy[half:].mean(axis=0)
++    spread = max(xy[:half].std(axis=0).mean(), xy[half:].std(axis=0).mean())
++    assert np.linalg.norm(ca - cb) > spread

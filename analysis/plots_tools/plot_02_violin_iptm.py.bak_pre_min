@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""plot_02 — ipTM distribution per stack (one violin per stack, 5 total).
+
+Pools both MSA-off refold conditions (AF3 + Boltz-2) into each stack's ipTM
+distribution. Static via matplotlib, interactive via plotly, one figure each.
+"""
+from __future__ import annotations
+import numpy as np
+import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+
+import config as cfg
+import data_loader as D
+import plot_helpers as H
+
+NAME = "plot_02_violin_iptm"
+METRIC, LABEL, TMIN = "iptm", "ipTM", "iptm_min"
+CLICK_JS = H.CLICK_JS   # violin points are click-to-open (design's 3 refolds in ChimeraX)
+
+
+def generate(df, cfg):
+    if not D.has_metric(df, METRIC):
+        return H.pending_pair(f"{LABEL} distribution by stack", f"{METRIC} not available yet")
+    d = df[df[METRIC].notna()].copy()
+    d = d.merge(D.cif_paths(stacks=list(d["stack"].unique())), on="design_id", how="left")
+    for c in ("af3_msaoff_cif_path", "b2_cif_path", "esm_cif_path"):
+        if c not in d.columns:
+            d[c] = ""
+    stacks = [s for s in H.ordered_stacks(d) if (d["stack"] == s).any()]
+    data = {s: d[d["stack"] == s][METRIC].to_numpy() for s in stacks}
+    thr = cfg.THRESHOLDS[TMIN]
+
+    # ---- static (matplotlib) ----
+    fig, ax = plt.subplots(figsize=(9, 5.4))
+    parts = ax.violinplot([data[s] for s in stacks], showextrema=False, widths=0.85)
+    for i, s in enumerate(stacks):
+        body = parts["bodies"][i]
+        body.set_facecolor(cfg.color(s)); body.set_edgecolor(cfg.MARK_EDGE)
+        body.set_alpha(0.85); body.set_linewidth(1.0)
+        q1, med, q3 = np.percentile(data[s], [25, 50, 75])
+        ax.vlines(i + 1, q1, q3, color=cfg.INK_PRIMARY, lw=5, zorder=3)
+        ax.scatter(i + 1, med, color="white", edgecolor=cfg.INK_PRIMARY, s=24, zorder=4)
+    ax.set_xticks(range(1, len(stacks) + 1))
+    ax.set_xticklabels([H.display(s) for s in stacks], rotation=18, ha="right", fontsize=9)
+    ax.set_ylabel(LABEL)
+    ax.set_title(f"{LABEL} distribution by stack")
+    ax.grid(axis="x", visible=False)
+    H.add_mpl_threshold(ax, thr, "y", f"min {thr}")
+
+    # ---- interactive (plotly) ----
+    # each point is ONE refolder's value (AF3 + Boltz-2 pooled, 2 points/design) — not an average
+    _clab = {"af3_msa_off": "AF3 (MSA-off)", "b2_msa_off": "Boltz-2 (MSA-off)"}
+    pfig = go.Figure()
+    for s in stacks:
+        g = d[d["stack"] == s].copy()
+        g["_ref"] = g["refold_condition"].map(_clab).fillna(g["refold_condition"])
+        pfig.add_trace(go.Violin(
+            y=g[METRIC], name=H.display(s), line_color=cfg.MARK_EDGE, fillcolor=cfg.color(s),
+            opacity=0.85, box_visible=True, meanline_visible=True,
+            points="all", jitter=0.5, pointpos=0, marker=dict(size=3, opacity=0.35),
+            customdata=g[["design_id", "af3_msaoff_cif_path", "b2_cif_path",
+                          "esm_cif_path", "_ref"]].fillna(""),
+            hovertemplate=(f"{H.display(s)} · %{{customdata[4]}}<br>{LABEL}=%{{y:.3f}}"
+                           "<br>%{customdata[0]}<br><i>click → open 3 refolds</i><extra></extra>")))
+    pfig.update_layout(title=f"{LABEL} by stack  (AF3 + Boltz-2 pooled · click a point → 3 refolds)",
+                       yaxis_title=LABEL, showlegend=False)
+    H.add_plotly_threshold(pfig, thr, "y", f"min {thr}")
+    return fig, pfig
+
+
+if __name__ == "__main__":
+    _df = D.load()
+    _png, _html = H.save_pair(*generate(_df, cfg), NAME, click_js=CLICK_JS)
+    print(f"wrote {_png}\n      {_html}")

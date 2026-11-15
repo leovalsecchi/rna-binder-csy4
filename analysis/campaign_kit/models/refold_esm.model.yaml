@@ -1,0 +1,25 @@
+# EXAMPLE refold model — ESMFold2 (from code/configs/refold__esm/default.yaml).
+name: refold_esm
+kind: refold
+container:
+  sif: ${rb_root}/containers/esmc.sif
+  apptainer_cmd: run
+  nv: true
+  binds: ["${shared}:${shared}"]
+  hf_cache: ${shared}/${user}/.hf_cache
+  envs: {}
+entrypoint: "python esmfold2_infer.py"
+params:
+  num_recycles: 4
+flag_style: {boolean_flags: [], render: "--{key} {value}"}
+per_unit_seed: false
+io:
+  needs: [design_cif, rna_sequence]
+  emits: refold_esm/
+  units_per_job: 1
+compat_hints:
+  min_arch: sm_75              # runs on Turing 24G via the pure-PyTorch SDPA fallback (probe confirms)
+  vram_g: 13.5                 # ~13.5G measured
+  sec_per_unit: 4              # very fast per design
+probe:
+  jobname_match: "(refold_esm|rfesm)"

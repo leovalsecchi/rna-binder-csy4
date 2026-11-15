@@ -1,0 +1,256 @@
+diff --git a/HalluDesign_run.py b/HalluDesign_run.py
+index 0c6fe57..f4239a4 100644
+--- a/HalluDesign_run.py
++++ b/HalluDesign_run.py
+@@ -76,6 +76,8 @@ def parse_arguments():
+                     help='which mpnn model do you choose proteinmpnn, ligandmpnn or ligandmpnn_plus_proteinmpnn (ligandmpnn for ligand binding part and proteinmpnn for protein part)')
+     parser.add_argument('--mpnn_temperature', type=float, default=0.1,
+                        help='mpnn temperature to use')
++    parser.add_argument('--mpnn_num_packs', type=int, default=1,
++                       help='number_of_packs_per_design for the MPNN side-chain packer (sidechain pack count per design)')
+     parser.add_argument('--replace_MSA', action='store_true', default=False,
+                        help='framework to use MSA, used in antibody or nanobody design')
+     parser.add_argument('--ccd', type=str, nargs='+', required=False, default=[],
+@@ -134,7 +136,7 @@ def main():
+                              T=args.mpnn_temperature, 
+                              ligand_mpnn_use_side_chain_context=1,
+                              ligand_mpnn_use_atom_context=1,
+-                             number_of_packs_per_design=1,
++                             number_of_packs_per_design=args.mpnn_num_packs,
+                              pack_side_chains=1,
+                              parse_atoms_with_zero_occupancy=1,
+                              pack_with_ligand_context= 0,
+@@ -145,7 +147,7 @@ def main():
+                              T=args.mpnn_temperature, 
+                              ligand_mpnn_use_side_chain_context=1,
+                              ligand_mpnn_use_atom_context=1,
+-                             number_of_packs_per_design=1,
++                             number_of_packs_per_design=args.mpnn_num_packs,
+                              pack_side_chains=1,
+                              parse_atoms_with_zero_occupancy=1,
+                              pack_with_ligand_context= 0,
+@@ -155,7 +157,7 @@ def main():
+                              T=args.mpnn_temperature, 
+                              ligand_mpnn_use_side_chain_context=1,
+                              ligand_mpnn_use_atom_context=1,
+-                             number_of_packs_per_design=1,
++                             number_of_packs_per_design=args.mpnn_num_packs,
+                              pack_side_chains=1,
+                              parse_atoms_with_zero_occupancy=1,
+                              pack_with_ligand_context= 0,
+@@ -164,7 +166,7 @@ def main():
+                              T=args.mpnn_temperature, 
+                              ligand_mpnn_use_side_chain_context=1,
+                              ligand_mpnn_use_atom_context=1,
+-                             number_of_packs_per_design=1,
++                             number_of_packs_per_design=args.mpnn_num_packs,
+                              pack_side_chains=1,
+                              parse_atoms_with_zero_occupancy=1,
+                              pack_with_ligand_context= 0,
+@@ -176,7 +178,7 @@ def main():
+                          T=args.mpnn_temperature, 
+                          ligand_mpnn_use_side_chain_context=1,
+                          ligand_mpnn_use_atom_context=1,
+-                         number_of_packs_per_design=1,
++                         number_of_packs_per_design=args.mpnn_num_packs,
+                          pack_side_chains=1,
+                          parse_atoms_with_zero_occupancy=1,
+                          pack_with_ligand_context= 0,
+diff --git a/af3_model.py b/af3_model.py
+index 44a024e..14f4363 100644
+--- a/af3_model.py
++++ b/af3_model.py
+@@ -535,10 +535,10 @@ class AF3DesignerPack:
+         self.devices = jax.local_devices(backend='gpu')
+         home_dir = os.path.expanduser("~")
+         self._HOME_DIR = pathlib.Path(home_dir)
+-        self._MODEL_DIR =  self._HOME_DIR / 'model'
++        self._MODEL_DIR = pathlib.Path('/cluster/work/wicky/params/af3_params')
+ 
+ 
+-        self._FLASH_ATTENTION_IMPLEMENTATION = 'triton'
++        self._FLASH_ATTENTION_IMPLEMENTATION = 'xla'
+         jax.config.update(
+         'jax_compilation_cache_dir', jax_compilation_dir
+         )
+diff --git a/data/utility.py b/data/utility.py
+index fcc3352..ebd1118 100644
+--- a/data/utility.py
++++ b/data/utility.py
+@@ -612,6 +612,28 @@ def remove_inter_chain_connections(structure):
+                     atom.bonds = [bonded_atom for bonded_atom in atom.bonds if bonded_atom.get_serial_number() in chain_atoms]
+     return structure
+ 
++def _ca_by_resnum(structure, chains=None):
++    """{residue_number: Cα atom}, for matching the binder across the prediction↔
++    scaffold chain-letter swap. Restricted to `chains` when they carry Cα; else
++    (e.g. the named chain is RNA, which has no Cα) falls back to every Cα-bearing
++    chain — only the protein has Cα, so this still pairs the binder by residue."""
++    def collect(restrict):
++        d = {}
++        for model in structure:
++            for chain in model:
++                if restrict and chain.id not in restrict:
++                    continue
++                for residue in chain:
++                    if 'CA' in residue:
++                        d[residue.id[1]] = residue['CA']
++        return d
++    if chains:
++        d = collect(set(chains))
++        if d:
++            return d
++    return collect(None)
++
++
+ def calculate_ca_rmsd(cif_file, pdb_file,fixed_chains=None):
+     protein_rmsd = 100.0
+     binder_rmsd = 100.0
+@@ -634,8 +656,8 @@ def calculate_ca_rmsd(cif_file, pdb_file,fixed_chains=None):
+         #pdb_structure = remove_inter_chain_connections(pdb_structure)
+         # get Cα atom
+         if fixed_chains:
+-            cif_ca_dict_fix = get_ca_dict(cif_structure,fixed_chains)
+-            pdb_ca_dict_fix = get_ca_dict(pdb_structure,fixed_chains)
++            cif_ca_dict_fix = _ca_by_resnum(cif_structure, fixed_chains)
++            pdb_ca_dict_fix = _ca_by_resnum(pdb_structure, fixed_chains)
+             # Find common (chain ID, residue number)
+             common_keys = set(cif_ca_dict_fix.keys()) & set(pdb_ca_dict_fix.keys())
+             if not common_keys:
+@@ -651,18 +673,19 @@ def calculate_ca_rmsd(cif_file, pdb_file,fixed_chains=None):
+     
+             protein_rmsd = super_imposer.rms
+ 
+-            cif_ca_dict_all = get_ca_dict(cif_structure)
+-            pdb_ca_dict_all = get_ca_dict(pdb_structure)
++            cif_ca_dict_all = _ca_by_resnum(cif_structure)
++            pdb_ca_dict_all = _ca_by_resnum(pdb_structure)
+ 
+-            # Find common (chain ID, residue number)
+-            common_keys_all = (set(cif_ca_dict_all.keys()) & set(pdb_ca_dict_all.keys()))-common_keys
++            # Common residues NOT in the fixed (binder) set
++            common_keys_all = (set(cif_ca_dict_all.keys()) & set(pdb_ca_dict_all.keys())) - common_keys
+             sorted_keys_all = sorted(common_keys_all)  # Sort by chain ID and residue number
+ 
+             cif_ca_all = [cif_ca_dict_all[key] for key in sorted_keys_all]
+             pdb_ca_all = [pdb_ca_dict_all[key] for key in sorted_keys_all]
+-            ref_coords = np.array([atom.get_coord() for atom in cif_ca_all])
+-            model_coords = np.array([atom.get_coord() for atom in pdb_ca_all])
+-            binder_rmsd = np.sqrt(np.mean(np.sum((ref_coords - model_coords) ** 2, axis=1)))
++            if cif_ca_all:
++                ref_coords = np.array([atom.get_coord() for atom in cif_ca_all])
++                model_coords = np.array([atom.get_coord() for atom in pdb_ca_all])
++                binder_rmsd = np.sqrt(np.mean(np.sum((ref_coords - model_coords) ** 2, axis=1)))
+             #super_imposer_all = Superimposer()
+             #super_imposer_all.set_atoms(cif_ca_all, pdb_ca_all) 
+             #binder_rmsd = super_imposer_all.rms
+diff --git a/eval/evaluation.py b/eval/evaluation.py
+index f319ff9..69ab4ba 100644
+--- a/eval/evaluation.py
++++ b/eval/evaluation.py
+@@ -208,6 +208,23 @@ def self_consistency_protenix(scaffold_path,
+             
+         base_name = os.path.basename(scaffold_path)
+        
++        print("=== PRE-PREDICT PROBE START ===", flush=True)
++        import os as _os
++        print("  CUTLASS_PATH:", _os.environ.get("CUTLASS_PATH"), flush=True)
++        print("  CUDA_HOME:", _os.environ.get("CUDA_HOME"), flush=True)
++        print("  DS_SKIP_CUDA_CHECK:", _os.environ.get("DS_SKIP_CUDA_CHECK"), flush=True)
++        print("  PATH[:300]:", _os.environ.get("PATH","")[:300], flush=True)
++        try:
++            from deepspeed.ops.op_builder.evoformer_attn import EvoformerAttnBuilder as _Eab
++            _b = _Eab()
++            print("  is_compatible(verbose=True):", _b.is_compatible(verbose=True), flush=True)
++            print("  self.cutlass_path:", _b.cutlass_path, flush=True)
++        except Exception as _e:
++            print("  probe failed:", repr(_e), flush=True)
++        import subprocess as _sp
++        _r = _sp.run(["which","nvcc"], capture_output=True, text=True)
++        print("  which nvcc:", _r.stdout.strip() or _r.stderr.strip(), flush=True)
++        print("=== PRE-PREDICT PROBE END ===", flush=True)
+         results_eval=AF3Designer_model.predict(
+             input_json_path=json_path,
+             dump_dir=output_dir,
+@@ -850,6 +867,7 @@ def get_fake_msa(file_path: str,fake_msa,chain,mpnn_model):
+         
+ 
+ def process_confidence_metrics_protenix(results_op, cif_path: str, copied_file : str,scaffold_path, metrics_tile,pocket_res,chain_types,fixed_chains,count_tuple) -> Dict:
++    from eval._metrics_probe import probe; probe(results_op, cif_path, count_tuple)
+     """Process confidence metrics output by AF3"""
+     try:
+         #print(results_op)
+@@ -914,7 +932,7 @@ def process_confidence_metrics_protenix(results_op, cif_path: str, copied_file :
+         for i in range(0,count):
+             label = chain_labels[i]
+             metrics[f'op_{label}_plddt'] = calculate_average_b_factor(cif_path,[label])
+-            metrics[f'op_{label}_ptm'] = dict_result['chain_ptm'][i].item()
++            metrics[f'op_{label}_ptm'] = dict_result['chain_ptm'][i] if i < len(dict_result['chain_ptm']) else None
+         
+         try:
+             rmsd_result = calculate_ca_rmsd(cif_path, copied_file,fixed_chains)
+@@ -1062,7 +1080,7 @@ def process_confidence_metrics_af3(results_op, cif_path: str, copied_file : str,
+         for i in range(0,count):
+             label = chain_labels[i]
+             metrics[f'op_{label}_plddt'] = calculate_average_b_factor(cif_path,[label])
+-            metrics[f'op_{label}_ptm'] = dict_result['chain_ptm'][i]
++            metrics[f'op_{label}_ptm'] = dict_result['chain_ptm'][i] if i < len(dict_result['chain_ptm']) else None
+         try:
+             rmsd_result = calculate_ca_rmsd(cif_path, copied_file,fixed_chains)
+             rmsd_result_to_origin = calculate_ca_rmsd(cif_path, scaffold_path,fixed_chains)
+@@ -1799,4 +1817,4 @@ def subprocess_mpnn_CoDP_evaluation(input_file_pkl,
+         print("Timeout:", e.timeout)
+ 
+     except Exception as e:
+-        print("An unexpected error occurred:", str(e))
+\ No newline at end of file
++        print("An unexpected error occurred:", str(e))
+diff --git a/models_utility.py b/models_utility.py
+index f99b6f6..b50e17c 100644
+--- a/models_utility.py
++++ b/models_utility.py
+@@ -53,7 +53,7 @@ def af3_op_af3_eval(pdb_file: str,
+         metrics["cycle"] =cycle
+         
+         pdb_file = os.path.basename(pdb_file).lower().replace(".pdb","")
+-        pdb_file = re.sub(r"_recycle_.*_model", "", pdb_file)
++        pdb_file = re.sub(r"_recycle_.*", "", pdb_file)
+         metrics['file_name'] = pdb_file
+         copied_file = os.path.join(target_dir, metrics['file_name']+f"_recycle_{cycle+1}.pdb")
+         chain_number_list = []
+@@ -154,7 +154,7 @@ def af3_op_af3_eval(pdb_file: str,
+             template = json.load(f)
+         tag = f"{pdb_file}_recycle_{cycle+1}"
+         json_path = os.path.join(target_dir, metrics[0]['file_name']+".json")
+-        copied_file = metrics[0]["packed_path"] 
++        copied_file = source_file 
+         input_json = template.copy()
+         input_json['name'] = tag.replace(".pdb", "")
+         
+@@ -303,7 +303,7 @@ def af3_op_af3_eval(pdb_file: str,
+             return metrics, copied_file,chain_number_list_cdr
+             
+     except Exception as e:
+-        print(f"file error: {str(e)}")
++        import traceback; traceback.print_exc(); print(f"file error: {str(e)}")
+         return metrics, copied_file,chain_number_list_cdr
+     
+ 
+@@ -685,7 +685,7 @@ try:
+                     template = json.load(f)
+                 tag = f"{pdb_file}_recycle_{cycle+1}"
+                 json_path = os.path.join(target_dir, metrics[0]['file_name']+".json")
+-                copied_file = metrics[0]["packed_path"] 
++                copied_file = source_file 
+                 input_json = template.copy()
+             
+                 print("Designer_model is ProtenixInferrer.")
+@@ -890,7 +890,7 @@ try:
+                     
+                     # get output path
+                     tag =f"{tag}".lower()
+-                    cif_path = os.path.join(target_dir, tag.replace(".pdb", ""), tag.replace(".pdb", ""), 
++                    cif_path = os.path.join(target_dir, metrics[0]["file_name"], tag.replace(".pdb", ""), 
+                                           tag.replace(".pdb", "") + "_model.cif")
+                     
+                     metrics = process_confidence_metrics_af3(results_op,

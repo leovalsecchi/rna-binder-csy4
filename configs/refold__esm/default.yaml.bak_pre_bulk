@@ -1,0 +1,32 @@
+target_id: csy4_crrna_free
+config_kind: refold_esm
+config_name: default
+source_run: REQUIRED
+rna_sequence: ACUGCCGUAUAGGCAG
+slurm:
+  job_name: refold_esm
+  partition: gpuhe.24h
+  time: "12:00:00"
+  cpus_per_task: 4
+  mem_per_cpu: 8G
+  # GPU selection: ESMFold2's fused pair-bias attention is a Triton kernel that
+  # requires sm_80+ (Ampere/Ada) -- same constraint as AF3's triton path. Pin to
+  # the ampere_24g pool (rtx_3090=eu-g4, rtx_4090=eu-g6); excludes the Turing 24G
+  # cards (sm_75, kernel aborts) and the 11G 2080Ti (< 24G floor). The ESMC-6B
+  # backbone uses ~21G on a 24G card for our small csy4 complexes (16nt RNA +
+  # ~80-150aa binder). Much larger complexes can OOM (validated: dabramson's
+  # antibody-antigen pairs OOM'd 3/46). See GPU_REFOLD_COMPAT.md.
+  gpus: 1
+  gres: gpumem:24g
+  nodelist: eu-g4-[001-032],eu-g6-[001-080]   # ampere_24g (3090+4090)
+container:
+  sif: /cluster/work/wicky/containers/esmc.sif
+  # Local copy of the biohub/ESMFold2 + ESMC-6B HF weights cache (staged into
+  # lvalsecchi so the pipeline never depends on another user's dir).
+  hf_cache: /cluster/work/wicky/lvalsecchi/rna_binder/params/esmfold2_hf_cache/huggingface
+refolder_params:
+  num_loops: 20
+  num_sampling_steps: 100
+  num_diffusion_samples: 1   # one refold per design (sample0)
+  seed: 0
+  use_rna_msa: false         # single-sequence refold (msaoff); ESMFold2 MSA path not wired

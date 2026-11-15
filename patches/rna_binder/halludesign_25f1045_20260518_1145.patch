@@ -1,0 +1,118 @@
+diff --git a/af3_model.py b/af3_model.py
+index 44a024e..ad6522b 100644
+--- a/af3_model.py
++++ b/af3_model.py
+@@ -535,10 +535,10 @@ class AF3DesignerPack:
+         self.devices = jax.local_devices(backend='gpu')
+         home_dir = os.path.expanduser("~")
+         self._HOME_DIR = pathlib.Path(home_dir)
+-        self._MODEL_DIR =  self._HOME_DIR / 'model'
++        self._MODEL_DIR = pathlib.Path('/cluster/work/wicky/lvalsecchi/af3_params')
+ 
+ 
+-        self._FLASH_ATTENTION_IMPLEMENTATION = 'triton'
++        self._FLASH_ATTENTION_IMPLEMENTATION = 'xla'
+         jax.config.update(
+         'jax_compilation_cache_dir', jax_compilation_dir
+         )
+diff --git a/eval/evaluation.py b/eval/evaluation.py
+index f319ff9..69ab4ba 100644
+--- a/eval/evaluation.py
++++ b/eval/evaluation.py
+@@ -208,6 +208,23 @@ def self_consistency_protenix(scaffold_path,
+             
+         base_name = os.path.basename(scaffold_path)
+        
++        print("=== PRE-PREDICT PROBE START ===", flush=True)
++        import os as _os
++        print("  CUTLASS_PATH:", _os.environ.get("CUTLASS_PATH"), flush=True)
++        print("  CUDA_HOME:", _os.environ.get("CUDA_HOME"), flush=True)
++        print("  DS_SKIP_CUDA_CHECK:", _os.environ.get("DS_SKIP_CUDA_CHECK"), flush=True)
++        print("  PATH[:300]:", _os.environ.get("PATH","")[:300], flush=True)
++        try:
++            from deepspeed.ops.op_builder.evoformer_attn import EvoformerAttnBuilder as _Eab
++            _b = _Eab()
++            print("  is_compatible(verbose=True):", _b.is_compatible(verbose=True), flush=True)
++            print("  self.cutlass_path:", _b.cutlass_path, flush=True)
++        except Exception as _e:
++            print("  probe failed:", repr(_e), flush=True)
++        import subprocess as _sp
++        _r = _sp.run(["which","nvcc"], capture_output=True, text=True)
++        print("  which nvcc:", _r.stdout.strip() or _r.stderr.strip(), flush=True)
++        print("=== PRE-PREDICT PROBE END ===", flush=True)
+         results_eval=AF3Designer_model.predict(
+             input_json_path=json_path,
+             dump_dir=output_dir,
+@@ -850,6 +867,7 @@ def get_fake_msa(file_path: str,fake_msa,chain,mpnn_model):
+         
+ 
+ def process_confidence_metrics_protenix(results_op, cif_path: str, copied_file : str,scaffold_path, metrics_tile,pocket_res,chain_types,fixed_chains,count_tuple) -> Dict:
++    from eval._metrics_probe import probe; probe(results_op, cif_path, count_tuple)
+     """Process confidence metrics output by AF3"""
+     try:
+         #print(results_op)
+@@ -914,7 +932,7 @@ def process_confidence_metrics_protenix(results_op, cif_path: str, copied_file :
+         for i in range(0,count):
+             label = chain_labels[i]
+             metrics[f'op_{label}_plddt'] = calculate_average_b_factor(cif_path,[label])
+-            metrics[f'op_{label}_ptm'] = dict_result['chain_ptm'][i].item()
++            metrics[f'op_{label}_ptm'] = dict_result['chain_ptm'][i] if i < len(dict_result['chain_ptm']) else None
+         
+         try:
+             rmsd_result = calculate_ca_rmsd(cif_path, copied_file,fixed_chains)
+@@ -1062,7 +1080,7 @@ def process_confidence_metrics_af3(results_op, cif_path: str, copied_file : str,
+         for i in range(0,count):
+             label = chain_labels[i]
+             metrics[f'op_{label}_plddt'] = calculate_average_b_factor(cif_path,[label])
+-            metrics[f'op_{label}_ptm'] = dict_result['chain_ptm'][i]
++            metrics[f'op_{label}_ptm'] = dict_result['chain_ptm'][i] if i < len(dict_result['chain_ptm']) else None
+         try:
+             rmsd_result = calculate_ca_rmsd(cif_path, copied_file,fixed_chains)
+             rmsd_result_to_origin = calculate_ca_rmsd(cif_path, scaffold_path,fixed_chains)
+@@ -1799,4 +1817,4 @@ def subprocess_mpnn_CoDP_evaluation(input_file_pkl,
+         print("Timeout:", e.timeout)
+ 
+     except Exception as e:
+-        print("An unexpected error occurred:", str(e))
+\ No newline at end of file
++        print("An unexpected error occurred:", str(e))
+diff --git a/models_utility.py b/models_utility.py
+index f99b6f6..89931ae 100644
+--- a/models_utility.py
++++ b/models_utility.py
+@@ -53,7 +53,7 @@ def af3_op_af3_eval(pdb_file: str,
+         metrics["cycle"] =cycle
+         
+         pdb_file = os.path.basename(pdb_file).lower().replace(".pdb","")
+-        pdb_file = re.sub(r"_recycle_.*_model", "", pdb_file)
++        pdb_file = re.sub(r"_recycle_.*", "", pdb_file)
+         metrics['file_name'] = pdb_file
+         copied_file = os.path.join(target_dir, metrics['file_name']+f"_recycle_{cycle+1}.pdb")
+         chain_number_list = []
+@@ -154,7 +154,7 @@ def af3_op_af3_eval(pdb_file: str,
+             template = json.load(f)
+         tag = f"{pdb_file}_recycle_{cycle+1}"
+         json_path = os.path.join(target_dir, metrics[0]['file_name']+".json")
+-        copied_file = metrics[0]["packed_path"] 
++        copied_file = source_file 
+         input_json = template.copy()
+         input_json['name'] = tag.replace(".pdb", "")
+         
+@@ -303,7 +303,7 @@ def af3_op_af3_eval(pdb_file: str,
+             return metrics, copied_file,chain_number_list_cdr
+             
+     except Exception as e:
+-        print(f"file error: {str(e)}")
++        import traceback; traceback.print_exc(); print(f"file error: {str(e)}")
+         return metrics, copied_file,chain_number_list_cdr
+     
+ 
+@@ -685,7 +685,7 @@ try:
+                     template = json.load(f)
+                 tag = f"{pdb_file}_recycle_{cycle+1}"
+                 json_path = os.path.join(target_dir, metrics[0]['file_name']+".json")
+-                copied_file = metrics[0]["packed_path"] 
++                copied_file = source_file 
+                 input_json = template.copy()
+             
+                 print("Designer_model is ProtenixInferrer.")

@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+"""gpu_watcher v0 — greedy idle-filler / cross-pool rebalancer for Slurm GPU jobs.
+
+Relocates PENDING jobs of configured classes onto eligible pools that have idle
+reachable GPUs (and spare per-QOS GPU budget), preferring guaranteed tiers over
+preemptible bulk. Diagnoses node-limited vs cap-limited per class. DRY-RUN by
+default; pass --apply to actually mutate jobs. See gpu_watcher_build_spec.md.
+
+v0 scope: greedy idle-filling + the bulk/QOS-cap escape. No wait-time water-filling
+(v1) and no preemption/failure-aware completion model (v2) yet.
+"""
+import argparse, json, os, re, subprocess, sys, time, fcntl
+
+def sh(cmd):
+    return subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout
+
+def log(cfg, msg, also_print=True):
+    line = time.strftime("%Y-%m-%d %H:%M:%S ") + msg
+    try:
+        with open(cfg["policy"]["log_file"], "a") as fh:
+            fh.write(line + "\n")
+    except Exception:
+        pass
+    if also_print:
+        print(msg)
+
+# ---- parsing helpers -------------------------------------------------------
+
+def tl_hours(s):
+    s = s.strip()
+    if s in ("UNLIMITED", "INVALID", "", "NOT_SET"):
+        return 1e9
+    d = 0
+    if "-" in s:
+        dd, s = s.split("-", 1); d = int(dd)
+    p = [int(x) for x in s.split(":")]
+    if len(p) == 3:   h, m, sec = p
+    elif len(p) == 2: h, m, sec = 0, p[0], p[1]
+    else:             h, m, sec = p[0], 0, 0
+    return d * 24 + h + m / 60.0 + sec / 3600.0
+
+def parse_nodes():
+    nodes = []
+    for line in sh("scontrol show node -o").splitlines():
+        if not line.strip():
+            continue
+        kv = dict(re.findall(r'(\w+)=(\S+)', line))
+        gres = kv.get("Gres", "")
+        m = re.search(r'gpumem:\S*?:(\d+)G', gres)
+        vram = int(m.group(1)) if m else 0
+        def gpu(tres):
+            mm = re.search(r'gres/gpu=(\d+)', tres or "")
+            return int(mm.group(1)) if mm else 0
+        tot, alloc = gpu(kv.get("CfgTRES", "")), gpu(kv.get("AllocTRES", ""))
+        nodes.append({
+            "name": kv.get("NodeName", ""),
+            "parts": set(kv.get("Partitions", "").split(",")) if kv.get("Partitions") else set(),
+            "vram": vram,
+            "idle": max(0, tot - alloc),
+        })
+    return nodes
+
+def parse_myjobs(user):
+    jobs = []
+    for line in sh(f"squeue -u {user} -h -o '%i|%j|%t|%P|%q|%r|%l'").splitlines():
+        f = line.split("|")
+        if len(f) < 7:
+            continue
+        jobs.append({"id": f[0].strip(), "name": f[1].strip(), "state": f[2].strip(),
+                     "part": f[3].strip(), "qos": f[4].strip(), "reason": f[5].strip(),
+                     "tl_h": tl_hours(f[6])})
+    return jobs
+
+def class_runtimes(classes, hours, classspecs, user):
+    """[v1] Median elapsed (hours) of recently COMPLETED jobs per class, from sacct;
+    falls back to per-class runtime_fallback_h when there's no recent history.
+    NB: filter state in Python -- `sacct -s CD` returns nothing on this cluster."""
+    byname = {}
+    for line in sh(f"sacct -X -n -u {user} -S now-{hours}hours -o JobName,State,Elapsed -P").splitlines():
+        f = line.split("|")
+        if len(f) < 3 or f[1].strip() != "COMPLETED":
+            continue
+        h = tl_hours(f[2].strip())
+        if 0 < h < 1e6:
+            byname.setdefault(f[0].strip(), []).append(h)
+    out = {}
+    for c in classes:
+        vals = sorted(byname.get(c, []))
+        out[c] = (vals[len(vals) // 2] if vals
+                  else classspecs.get(c, {}).get("runtime_fallback_h", 2.0))
+    return out
+
+# ---- state (cooldowns) -----------------------------------------------------
+
+def load_state(p):
+    try:
+        with open(p) as fh: return json.load(fh)
+    except Exception:
+        return {"moved_at": {}}
+
+def save_state(p, st):
+    try:
+        with open(p, "w") as fh: json.dump(st, fh)
+    except Exception:
+        pass
+
+# ---- core ------------------------------------------------------------------
+
+def fam_idle(nodes, prefixes, req_vram):
+    return sum(n["idle"] for n in nodes
+               if n["vram"] >= req_vram and any(n["name"].startswith(p) for p in prefixes))
+
+def run_cycle(cfg, apply):
+    pol = cfg["policy"]
+    user = pol["user"]
+    caps = cfg["qos_gpu_caps"]
+    cooldown_s = pol["move_cooldown_min"] * 60
+    now = time.time()
+
+    # kill-switch
+    ks = pol.get("kill_switch")
+    if ks and os.path.exists(ks):
+        if open(ks).read().strip() != "1":
+            log(cfg, "[paused] kill-switch != 1; no action."); return
+
+    nodes = parse_nodes()
+    jobs = parse_myjobs(user)
+    runtimes = class_runtimes(list(cfg["job_classes"].keys()),
+                              pol.get("runtime_window_h", 24), cfg["job_classes"], user)
+    state = load_state(pol["state_file"])
+    moved_at = state.get("moved_at", {})
+
+    # running GPU usage per qos (1 GPU/job for these refold classes)
+    qos_running = {}
+    for j in jobs:
+        if j["state"] == "R":
+            qos_running[j["qos"]] = qos_running.get(j["qos"], 0) + 1
+    qos_left = {q: caps.get(q, 0) - qos_running.get(q, 0) for q in caps}
+
+    log(cfg, "=" * 78)
+    log(cfg, f"gpu_watcher cycle  user={user}  apply={apply}")
+    rh = {}
+    for j in jobs:
+        if j["state"] != "R":
+            rh[j["reason"]] = rh.get(j["reason"], 0) + 1
+    log(cfg, "pending reasons: " + ", ".join(f"{k}={v}" for k, v in sorted(rh.items(), key=lambda x: -x[1])))
+    log(cfg, "qos GPU usage:   " + ", ".join(f"{q.replace('es_wicky/','')} {qos_running.get(q,0)}/{caps[q]}" for q in caps))
+
+    all_moves = []
+    move_budget = pol["max_moves_per_cycle"]
+
+    for cls, spec in cfg["job_classes"].items():
+        req = spec["req_gpumem_g"]
+        pend = [j for j in jobs if j["name"] == cls and j["state"] == "PD"]
+        run = [j for j in jobs if j["name"] == cls and j["state"] == "R"]
+        if not pend and not run:
+            continue
+
+        # family idle (shared across tiers of the same node-prefix set)
+        fkeys = {tuple(t["node_prefixes"]) for t in spec["targets"]}
+        fidle = {k: fam_idle(nodes, k, req) for k in fkeys}
+
+        # diagnose regime
+        guar = [t for t in spec["targets"] if not t["preempt"]]
+        guar_idle = sum(fidle[tuple(t["node_prefixes"])] for t in guar) > 0
+        guar_qos_left = any(qos_left.get(t["qos"], 0) > 0 for t in guar)
+        regime = ("node-limited" if not guar_idle and guar_qos_left
+                  else "cap-limited (guaranteed qos full -> bulk escape)" if not guar_qos_left
+                  else "has-room" if guar_idle else "blocked")
+
+        rt = runtimes.get(cls, 2.0)
+        run_by_part = {}
+        for j in run:
+            run_by_part[j["part"]] = run_by_part.get(j["part"], 0) + 1
+        log(cfg, f"--- {cls}: {len(pend)} pending, {len(run)} running.  runtime~{rt:.1f}h  regime: {regime}")
+        for t in spec["targets"]:
+            k = tuple(t["node_prefixes"])
+            here = sum(1 for j in pend if j["part"] == t["partition"])
+            R = run_by_part.get(t["partition"], 0)
+            # [v1] observable wait estimate: backlog ahead / your drain rate (running/runtime)
+            ew = (here * rt / R) if R > 0 else (float("inf") if here > 0 else 0.0)
+            ews = "inf" if ew == float("inf") else f"{ew:.1f}h"
+            mb = t.get("min_buffer", 0)
+            log(cfg, f"      {t['partition']:<12} qos={t['qos'].replace('es_wicky/',''):<10} "
+                     f"fam_idle={fidle[k]:<4} qos_left={qos_left.get(t['qos'],0):<4} "
+                     f"here={here:<4} run={R:<3} est_wait={ews:<6} buffer={mb}")
+
+        pref = sorted(spec["targets"], key=lambda x: x["preempt"])  # guaranteed (False) before bulk (True)
+        already_moved = set()
+        cls_moves = []                     # (job, target, reason) for this class
+
+        def here_now(part):
+            base = sum(1 for j in pend if j["part"] == part and j["id"] not in already_moved)
+            return base + sum(1 for _j, _t, _r in cls_moves if _t["partition"] == part)
+
+        def src_buf(part):
+            st = next((x for x in spec["targets"] if x["partition"] == part), None)
+            return st.get("min_buffer", 0) if st else 0
+
+        # PASS 1 -- idle-fill: place jobs where GPUs are genuinely idle (bounded by qos budget).
+        fidle_w = dict(fidle); qleft_w = dict(qos_left)
+        for t in pref:
+            if move_budget <= 0:
+                break
+            k = tuple(t["node_prefixes"])
+            slots = min(fidle_w.get(k, 0), qleft_w.get(t["qos"], 0))
+            if slots <= 0:
+                continue
+            here = here_now(t["partition"])
+            free = min(slots - here, t.get("ramp", pol["per_target_ramp"]), move_budget)
+            consume = min(slots, here)     # local backlog claims idle capacity first
+            fidle_w[k] -= consume; qleft_w[t["qos"]] -= consume
+            if free <= 0:
+                continue
+            cands = [j for j in pend
+                     if j["part"] != t["partition"] and j["id"] not in already_moved
+                     and j["tl_h"] <= t["max_time_h"]
+                     and (now - moved_at.get(j["id"], 0)) >= cooldown_s]
+            for j in cands[:free]:
+                cls_moves.append((j, t, "idle")); already_moved.add(j["id"])
+                fidle_w[k] -= 1; qleft_w[t["qos"]] -= 1; move_budget -= 1
+
+        # PASS 2 -- buffer-fill: keep >= min_buffer of my jobs queued in each target so I'm
+        # always in line to grab a GPU the instant it frees (presence, not idle). Pending jobs
+        # don't consume the qos run-cap, so this is NOT bounded by qos_left -- only by throttles.
+        for t in pref:
+            if move_budget <= 0:
+                break
+            mb = t.get("min_buffer", 0)
+            deficit = min(mb - here_now(t["partition"]),
+                          t.get("ramp", pol["per_target_ramp"]), move_budget)
+            if deficit <= 0:
+                continue
+            cands = [j for j in pend
+                     if j["part"] != t["partition"] and j["id"] not in already_moved
+                     and j["tl_h"] <= t["max_time_h"]
+                     and (now - moved_at.get(j["id"], 0)) >= cooldown_s
+                     and here_now(j["part"]) - 1 >= src_buf(j["part"])]   # don't drain a source below its buffer
+            cands.sort(key=lambda j: here_now(j["part"]), reverse=True)   # pull from the fullest source
+            for j in cands[:deficit]:
+                cls_moves.append((j, t, "buffer")); already_moved.add(j["id"]); move_budget -= 1
+
+        # PASS 3 [v1] -- water-fill: among targets that are actually DRAINING (finite
+        # est_wait), move EXCESS backlog (above min_buffer) from the worst-waiting to the
+        # best-draining target until the gap closes below min_improvement_h, recomputing
+        # est_wait after every move. Stalled pools (run=0 -> est_wait inf) are NOT
+        # wait-balanced -- the buffer owns their presence; we only refine real gradients.
+        min_impr = pol.get("min_improvement_h", 0.5)
+        pcount = {t["partition"]: here_now(t["partition"]) for t in spec["targets"]}
+        rcount = {t["partition"]: run_by_part.get(t["partition"], 0) for t in spec["targets"]}
+        into, skip_src = {}, set()
+
+        def ew2(part):
+            R, P = rcount.get(part, 0), pcount.get(part, 0)
+            return (P * rt / R) if R > 0 else (float("inf") if P > 0 else 0.0)
+
+        guard = 0
+        while move_budget > 0 and guard < 2000:
+            guard += 1
+            fin = [t for t in spec["targets"] if ew2(t["partition"]) < float("inf")]
+            if len(fin) < 2:
+                break
+            D = min(fin, key=lambda t: ew2(t["partition"]))
+            if into.get(D["partition"], 0) >= D.get("ramp", pol["per_target_ramp"]):
+                break
+            S = max((t for t in fin
+                     if t["partition"] != D["partition"] and t["partition"] not in skip_src
+                     and pcount[t["partition"]] > t.get("min_buffer", 0)),
+                    key=lambda t: ew2(t["partition"]), default=None)
+            if S is None or ew2(S["partition"]) - ew2(D["partition"]) < min_impr:
+                break
+            cand = next((j for j in pend
+                         if j["part"] == S["partition"] and j["id"] not in already_moved
+                         and j["tl_h"] <= D["max_time_h"]
+                         and (now - moved_at.get(j["id"], 0)) >= cooldown_s), None)
+            if cand is None:
+                skip_src.add(S["partition"]); continue
+            cls_moves.append((cand, D, "waterfill")); already_moved.add(cand["id"])
+            pcount[S["partition"]] -= 1; pcount[D["partition"]] += 1
+            into[D["partition"]] = into.get(D["partition"], 0) + 1
+            move_budget -= 1
+
+        all_moves.extend(cls_moves)
+
+    # report / apply
+    if not all_moves:
+        log(cfg, "no beneficial moves this cycle.")
+    else:
+        by_reason = {}
+        for _j, _t, r in all_moves:
+            by_reason[r] = by_reason.get(r, 0) + 1
+        log(cfg, f"PLANNED {len(all_moves)} move(s) ({', '.join(f'{v} {k}' for k, v in by_reason.items())}):")
+        for j, t, r in all_moves[:60]:
+            log(cfg, f"  [{r:<6}] {j['id']}  {j['name']}  {j['part']} -> {t['partition']}  ({t['qos'].replace('es_wicky/','')})")
+    if apply:
+        for j, t, r in all_moves:
+            cmd = f"scontrol update jobid={j['id']} partition={t['partition']} qos={t['qos']}"
+            cmd += f" ReqNodeList={t['set_nodes']}" if t.get("set_nodes") else " ReqNodeList="
+            cmd += f" Features={t['set_features']}" if t.get("set_features") else " Features="
+            res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            ok = res.returncode == 0
+            log(cfg, f"  {'OK ' if ok else 'ERR'} [{r}] {j['id']} -> {t['partition']}"
+                     + ("" if ok else f"  ({res.stderr.strip()[:80]})"))
+            if ok:
+                moved_at[j["id"]] = now
+        state["moved_at"] = {k: v for k, v in moved_at.items() if now - v < 86400}
+        save_state(pol["state_file"], state)
+    else:
+        log(cfg, "(dry-run: no changes made; pass --apply to enact)")
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", required=True)
+    ap.add_argument("--apply", action="store_true", help="enact moves (default: dry-run)")
+    ap.add_argument("--loop", action="store_true", help="loop every cycle_minutes")
+    a = ap.parse_args()
+    cfg = json.load(open(a.config))
+
+    lf = open(cfg["policy"]["lock_file"], "w")
+    try:
+        fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("another gpu_watcher instance holds the lock; exiting."); sys.exit(0)
+
+    while True:
+        try:
+            run_cycle(cfg, a.apply)
+        except Exception as e:
+            log(cfg, f"[error] {e}")
+        if not a.loop:
+            break
+        time.sleep(cfg["policy"]["cycle_minutes"] * 60)
+
+if __name__ == "__main__":
+    main()

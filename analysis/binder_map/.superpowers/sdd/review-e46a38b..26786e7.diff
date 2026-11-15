@@ -1,0 +1,243 @@
+# Review package: e46a38b..26786e7
+
+## Commits
+26786e7 Stream hit tables and shrink the kNN block for 500k nodes
+
+## Files changed
+ scripts/stage4_graph.py   | 68 +++++++++++++++++++++++++++++++--------------
+ src/binder_map/knn.py     |  9 +++---
+ tests/test_hits_stream.py | 70 +++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 123 insertions(+), 24 deletions(-)
+
+## Diff
+diff --git a/scripts/stage4_graph.py b/scripts/stage4_graph.py
+index 4bd0521..543f5e5 100755
+--- a/scripts/stage4_graph.py
++++ b/scripts/stage4_graph.py
+@@ -17,20 +17,64 @@ import numpy as np
+ import pandas as pd
+ 
+ from binder_map import FINGERPRINT_DIM
+ from binder_map.fingerprint import FINGERPRINT_COLUMNS
+ from binder_map.knn import knn_from_pairs, knn_from_vectors, symmetrise_min
+ 
+ FM = Path("/cluster/work/wicky/lvalsecchi/rna_binder/analyses/foldseek_map")
+ REDUNDANCY_TM = 0.95
+ 
+ 
++HIT_COLUMNS = ["query", "target", "qtmscore", "ttmscore", "alntmscore",
++               "lddt", "fident", "alnlen", "evalue", "bits"]
++HIT_CHUNK = 5_000_000
++
++
++def load_hits(hit_files, index):
++    """Stream hit TSVs into compact (qi, tj, qtm, ttm) arrays.
++
++    The previous implementation did `pd.concat([pd.read_csv(f) for f in files])`,
++    which materialises every row with two Python-string columns. At 31,763 nodes
++    that was 1.3 GB of TSV and fine; at ~508k nodes it is ~20 GB and ~150M rows,
++    which exhausts the node before the first edge is built.
++
++    Mapping names to node ids per chunk and keeping int32/float32 costs ~12 bytes
++    per directed hit, so the same data sits in ~1.8 GB.
++    """
++    qs, ts, qtms, ttms = [], [], [], []
++    unknown = 0
++    for path in hit_files:
++        if Path(path).stat().st_size == 0:
++            continue
++        reader = pd.read_csv(
++            path, sep="\t", names=HIT_COLUMNS, header=None,
++            usecols=["query", "target", "qtmscore", "ttmscore"],
++            dtype={"qtmscore": "float32", "ttmscore": "float32"},
++            chunksize=HIT_CHUNK,
++        )
++        for chunk in reader:
++            qi = index.reindex(chunk["query"].str.removesuffix(".pdb")).to_numpy()
++            tj = index.reindex(chunk["target"].str.removesuffix(".pdb")).to_numpy()
++            known = ~(np.isnan(qi) | np.isnan(tj))
++            unknown += int((~known).sum())
++            qs.append(qi[known].astype(np.int32))
++            ts.append(tj[known].astype(np.int32))
++            qtms.append(chunk["qtmscore"].to_numpy()[known])
++            ttms.append(chunk["ttmscore"].to_numpy()[known])
++    if not qs:
++        empty_i = np.empty(0, np.int32)
++        empty_f = np.empty(0, np.float32)
++        return empty_i, empty_i.copy(), empty_f, empty_f.copy(), unknown
++    return (np.concatenate(qs), np.concatenate(ts),
++            np.concatenate(qtms), np.concatenate(ttms), unknown)
++
++
+ def write_axis(out_dir: Path, axis: str, nodes: pd.DataFrame, res, redundancy):
+     dest = out_dir / "graph" / axis
+     dest.mkdir(parents=True, exist_ok=True)
+     pd.DataFrame({
+         "i": res.cluster_edges[:, 0] if len(res.cluster_edges) else np.array([], np.int32),
+         "j": res.cluster_edges[:, 1] if len(res.cluster_edges) else np.array([], np.int32),
+         "sim": res.cluster_weights,
+     }).to_parquet(dest / "edges_cluster.parquet", index=False)
+     pd.DataFrame({
+         "i": res.layout_edges[:, 0] if len(res.layout_edges) else np.array([], np.int32),
+@@ -61,44 +105,28 @@ def main() -> int:
+     parser.add_argument("--results", type=Path, default=FM / "results")
+     args = parser.parse_args()
+ 
+     out = args.results / args.layer
+     nodes = pd.read_csv(out / "dedup" / "nodes.tsv", sep="\t")
+     index = pd.Series(nodes["node_id"].values, index=nodes["struct_name"].values)
+     n = len(nodes)
+     print(f"{args.layer}: {n:,d} nodes")
+ 
+     # ---------- fold axis ----------
+-    columns = ["query", "target", "qtmscore", "ttmscore", "alntmscore",
+-               "lddt", "fident", "alnlen", "evalue", "bits"]
+     hit_files = sorted((out / "hits").glob("hits_*.tsv"))
+     if not hit_files:
+         print("FATAL: no hit files; did stage 3 run?")
+         return 1
+-    hits = pd.concat(
+-        [pd.read_csv(f, sep="\t", names=columns, header=None) for f in hit_files],
+-        ignore_index=True,
+-    )
+-    print(f"  {len(hits):,d} raw hits from {len(hit_files)} chunks")
+-
+-    # Foldseek reports names with the .pdb suffix the tar members carried.
+-    for column in ("query", "target"):
+-        hits[column] = hits[column].str.removesuffix(".pdb")
+-
+-    qi = index.reindex(hits["query"]).to_numpy()
+-    tj = index.reindex(hits["target"]).to_numpy()
+-    known = ~(np.isnan(qi) | np.isnan(tj))
+-    if (~known).any():
+-        print(f"  WARNING: {int((~known).sum()):,d} hits reference unknown names")
+-    qi, tj = qi[known].astype(int), tj[known].astype(int)
+-    qtm = hits["qtmscore"].to_numpy()[known]
+-    ttm = hits["ttmscore"].to_numpy()[known]
++    qi, tj, qtm, ttm, unknown = load_hits(hit_files, index)
++    print(f"  {len(qi):,d} usable hits from {len(hit_files)} chunks")
++    if unknown:
++        print(f"  WARNING: {unknown:,d} hits reference unknown names")
+ 
+     i, j, sim = symmetrise_min(qi, tj, qtm, ttm)
+     print(f"  {len(i):,d} undirected pairs after min(qTM,tTM)")
+ 
+     # Redundancy from the FULL hit list, before top-k truncation, else it
+     # saturates at k. Still bounded above by --max-seqs (300).
+     redundancy = np.zeros(n, dtype=np.int32)
+     strong = sim >= REDUNDANCY_TM
+     if strong.any():
+         np.add.at(redundancy, i[strong], 1)
+diff --git a/src/binder_map/knn.py b/src/binder_map/knn.py
+index f17e272..b51596d 100644
+--- a/src/binder_map/knn.py
++++ b/src/binder_map/knn.py
+@@ -157,27 +157,28 @@ def _assemble(n, i, j, sim, k, floor, mutual: bool = False) -> KNNResult:
+                      layout_edges, layout_weights,
+                      degree, degree == 0)
+ 
+ 
+ def knn_from_pairs(n, i, j, sim, k, floor, mutual: bool = False) -> KNNResult:
+     """Build both graphs from an existing sparse similarity list."""
+     return _assemble(n, np.asarray(i), np.asarray(j),
+                      np.asarray(sim, dtype=np.float32), k, floor, mutual)
+ 
+ 
+-def knn_from_vectors(vectors, k, floor, block: int = 4096,
++def knn_from_vectors(vectors, k, floor, block: int = 1024,
+                      mutual: bool = False) -> KNNResult:
+     """Exact cosine kNN over L1-normalised rows, by blocked matrix product.
+ 
+-    72k x 48 float32 is ~14 MB, so the full product is computed in blocks on
+-    one node in a couple of minutes. No approximate index, no extra
+-    dependency.
++    `block` rows are scored against all n at once, so the temporary is
++    block x n float32. At n = 508k a block of 4096 allocates 8.3 GB, which is
++    why the default is 1024 (2 GB). The product stays exact; only the blocking
++    changes.
+     """
+     v = np.asarray(vectors, dtype=np.float64)
+     n = len(v)
+ 
+     l1 = np.abs(v).sum(axis=1, keepdims=True)
+     l1[l1 == 0] = 1.0
+     v = v / l1
+     norm = np.linalg.norm(v, axis=1, keepdims=True)
+     norm[norm == 0] = 1.0
+     unit = (v / norm).astype(np.float32)
+diff --git a/tests/test_hits_stream.py b/tests/test_hits_stream.py
+new file mode 100644
+index 0000000..a0c02f9
+--- /dev/null
++++ b/tests/test_hits_stream.py
+@@ -0,0 +1,70 @@
++import numpy as np
++import pandas as pd
++
++from stage4_graph import load_hits
++
++COLUMNS = ["query", "target", "qtmscore", "ttmscore", "alntmscore",
++           "lddt", "fident", "alnlen", "evalue", "bits"]
++
++
++def _write_hits(path, rows):
++    frame = pd.DataFrame(rows, columns=COLUMNS)
++    frame.to_csv(path, sep="\t", header=False, index=False)
++
++
++def test_load_hits_maps_names_to_node_ids(tmp_path):
++    index = pd.Series([0, 1], index=["s0", "s1"])
++    _write_hits(tmp_path / "hits_00.tsv", [
++        ["s0.pdb", "s1.pdb", 0.9, 0.8, 0.85, 0.7, 0.5, 80, 1e-9, 100],
++    ])
++    qi, tj, qtm, ttm, unknown = load_hits([tmp_path / "hits_00.tsv"], index)
++    assert list(qi) == [0] and list(tj) == [1]
++    assert np.isclose(qtm[0], 0.9) and np.isclose(ttm[0], 0.8)
++    assert unknown == 0
++
++
++def test_load_hits_strips_the_pdb_suffix(tmp_path):
++    index = pd.Series([0, 1], index=["s0", "s1"])
++    _write_hits(tmp_path / "hits_00.tsv", [
++        ["s0.pdb", "s1.pdb", 0.9, 0.8, 0.85, 0.7, 0.5, 80, 1e-9, 100],
++    ])
++    qi, _, _, _, _ = load_hits([tmp_path / "hits_00.tsv"], index)
++    assert len(qi) == 1
++
++
++def test_load_hits_drops_and_counts_unknown_names(tmp_path):
++    index = pd.Series([0], index=["s0"])
++    _write_hits(tmp_path / "hits_00.tsv", [
++        ["s0.pdb", "s0.pdb", 0.9, 0.8, 0.85, 0.7, 0.5, 80, 1e-9, 100],
++        ["s0.pdb", "ghost.pdb", 0.7, 0.6, 0.65, 0.6, 0.4, 80, 1e-7, 90],
++    ])
++    qi, _, _, _, unknown = load_hits([tmp_path / "hits_00.tsv"], index)
++    assert len(qi) == 1
++    assert unknown == 1
++
++
++def test_load_hits_concatenates_multiple_chunk_files(tmp_path):
++    index = pd.Series([0, 1], index=["s0", "s1"])
++    _write_hits(tmp_path / "hits_00.tsv", [
++        ["s0.pdb", "s1.pdb", 0.9, 0.8, 0.85, 0.7, 0.5, 80, 1e-9, 100]])
++    _write_hits(tmp_path / "hits_01.tsv", [
++        ["s1.pdb", "s0.pdb", 0.6, 0.5, 0.55, 0.6, 0.4, 80, 1e-7, 90]])
++    qi, tj, _, _, _ = load_hits(
++        sorted(tmp_path.glob("hits_*.tsv")), index)
++    assert sorted(zip(qi.tolist(), tj.tolist())) == [(0, 1), (1, 0)]
++
++
++def test_load_hits_returns_compact_dtypes(tmp_path):
++    index = pd.Series([0, 1], index=["s0", "s1"])
++    _write_hits(tmp_path / "hits_00.tsv", [
++        ["s0.pdb", "s1.pdb", 0.9, 0.8, 0.85, 0.7, 0.5, 80, 1e-9, 100]])
++    qi, tj, qtm, ttm, _ = load_hits([tmp_path / "hits_00.tsv"], index)
++    assert qi.dtype == np.int32 and tj.dtype == np.int32
++    assert qtm.dtype == np.float32 and ttm.dtype == np.float32
++
++
++def test_load_hits_on_empty_file_returns_empty_arrays(tmp_path):
++    index = pd.Series([0], index=["s0"])
++    (tmp_path / "hits_00.tsv").write_text("")
++    qi, tj, qtm, ttm, unknown = load_hits([tmp_path / "hits_00.tsv"], index)
++    assert len(qi) == 0 and len(tj) == 0 and unknown == 0

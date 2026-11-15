@@ -1,0 +1,60 @@
+# BoltzGen config for csy4_crrna_free.
+# 1:1 reflection of _smoketests/boltzgen_rna_probe/smoketest.sbatch.
+# Last verified working: job 150206 COMPLETED in 3:38 (2026-05-19).
+
+target_id: csy4_crrna_free
+generator: boltzgen
+inverse_folder: boltzif        # BoltzGen's native inverse-fold pass (currently unused at default scale)
+config_name: default
+
+slurm:
+  job_name: bg_rna_smoke
+  partition: gpuhe.4h
+  time: "00:30:00"
+  cpus_per_task: 4
+  mem_per_cpu: "8G"
+  gpus: "rtx_3090:1"
+
+container:
+  sif: /cluster/work/wicky/containers/boltzgen.sif
+  apptainer_cmd: exec
+  nv: true
+  home: /cluster/work/wicky/lvalsecchi/rna_binder/_cache/boltzgen_sif/home
+
+  binds:
+    - "/cluster/work/wicky"
+
+  envs:
+    HF_HOME: /cluster/work/wicky/lvalsecchi/rna_binder/_cache/boltzgen_sif/hf
+    HUGGINGFACE_HUB_CACHE: /cluster/work/wicky/lvalsecchi/rna_binder/_cache/boltzgen_sif/hf
+    HF_HUB_OFFLINE: "1"          # critical: no internet on compute nodes
+    TRANSFORMERS_OFFLINE: "1"
+    XDG_CACHE_HOME: /cluster/work/wicky/lvalsecchi/rna_binder/_cache/boltzgen_sif/xdg
+    MPLCONFIGDIR: /cluster/work/wicky/lvalsecchi/rna_binder/_cache/boltzgen_sif/mpl
+    TMPDIR: /cluster/work/wicky/lvalsecchi/rna_binder/_cache/boltzgen_sif/tmp
+
+generator_params:
+  # BoltzGen consumes a spec.yaml describing the entities to design against.
+  spec:
+    entities:
+      - protein:
+          id: D
+          sequence: 80           # protein binder length
+      - file:
+          path: csy4_rna_only.pdb       # relative to spec.yaml location
+          include:
+            - chain:
+                id: B
+
+  cli:
+    command: "boltzgen run"
+    spec_arg: spec.yaml          # positional arg: the spec yaml filename
+    flags:
+      protocol: protein-anything
+      steps: [design, inverse_folding]
+      num_designs: 1
+      diffusion_batch_size: 1
+      # output is filled by the launcher at runtime
+
+# Output: BoltzGen creates config/, intermediate_designs/, steps.yaml, *.cif
+# in the directory passed via --output.

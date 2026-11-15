@@ -1,0 +1,124 @@
+"""Parse refolder-specific confidence JSON files.
+
+Both AF3 and B2 produce confidence JSONs alongside each refold .cif.
+
+AF3 schema (summary_confidences.json):
+    iptm, ptm, ranking_score, fraction_disordered, has_clash,
+    chain_iptm (list), chain_ptm (list), chain_pair_iptm (matrix),
+    chain_pair_pae_min (matrix)
+
+B2 schema (<design>_B2_sample<N>_confidence.json):
+    confidence_score, ptm, iptm, ligand_iptm, protein_iptm,
+    complex_plddt, complex_iplddt, complex_pde, complex_ipde,
+    chains_ptm (dict), pair_chains_iptm (nested dict)
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Optional
+
+
+def parse_af3_summary(path: Path) -> dict:
+    """Parse an AF3 *_summary_confidences.json into a flat metrics dict.
+
+    Args:
+        path: path to AF3 summary confidence JSON
+
+    Returns:
+        Flat dict with AF3 metrics. Empty dict if file doesn't exist.
+    """
+    if not path.exists():
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError, ValueError):
+        return {}
+    out = {
+        "af3_iptm": data.get("iptm"),
+        "af3_ptm": data.get("ptm"),
+        "af3_ranking_score": data.get("ranking_score"),
+        "af3_fraction_disordered": data.get("fraction_disordered"),
+        "af3_has_clash": data.get("has_clash"),
+    }
+    # Chain-level breakdowns
+    cp_iptm = data.get("chain_pair_iptm")
+    if cp_iptm and len(cp_iptm) >= 2 and len(cp_iptm[0]) >= 2:
+        # protein-RNA cross terms (assumes chain A=protein, B=RNA, indices 0 and 1)
+        out["af3_chain_A_iptm"] = cp_iptm[0][0]
+        out["af3_chain_B_iptm"] = cp_iptm[1][1]
+        out["af3_protein_rna_iptm"] = cp_iptm[0][1]
+    cp_ptm = data.get("chain_ptm")
+    if cp_ptm and len(cp_ptm) >= 2:
+        out["af3_chain_A_ptm"] = cp_ptm[0]
+        out["af3_chain_B_ptm"] = cp_ptm[1]
+    cp_pae = data.get("chain_pair_pae_min")
+    if cp_pae and len(cp_pae) >= 2 and len(cp_pae[0]) >= 2:
+        out["af3_protein_rna_pae_min"] = cp_pae[0][1]
+    return out
+
+
+def parse_b2_confidence(path: Path) -> dict:
+    """Parse a B2 *_confidence.json into a flat metrics dict.
+
+    Args:
+        path: path to B2 confidence JSON
+
+    Returns:
+        Flat dict with B2 metrics. Empty dict if file doesn't exist.
+    """
+    if not path.exists():
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError, ValueError):
+        return {}
+    out = {
+        "b2_iptm": data.get("iptm"),
+        "b2_ptm": data.get("ptm"),
+        "b2_confidence_score": data.get("confidence_score"),
+        "b2_ligand_iptm": data.get("ligand_iptm"),
+        "b2_protein_iptm": data.get("protein_iptm"),
+        "b2_complex_plddt": data.get("complex_plddt"),
+        "b2_complex_iplddt": data.get("complex_iplddt"),
+        "b2_complex_pde": data.get("complex_pde"),
+        "b2_complex_ipde": data.get("complex_ipde"),
+    }
+    # Chain breakdowns
+    cp = data.get("chains_ptm", {})
+    if cp:
+        out["b2_chain_A_ptm"] = cp.get("0")
+        out["b2_chain_B_ptm"] = cp.get("1")
+    pc = data.get("pair_chains_iptm", {})
+    if pc:
+        # pc["0"]["1"] = protein → RNA, pc["1"]["0"] = RNA → protein
+        out["b2_protein_rna_iptm"] = pc.get("0", {}).get("1")
+        out["b2_rna_protein_iptm"] = pc.get("1", {}).get("0")
+    return out
+
+
+def find_refolder_metrics(cif_path: Path, refolder: str) -> dict:
+    """Given a refold .cif path, locate and parse its confidence JSON.
+
+    AF3: <name>_AF3_seed<S>_sample<M>_summary_confidences.json
+    B2:  <name>_B2_sample<M>_confidence.json
+
+    Args:
+        cif_path: path to the refold .cif file
+        refolder: "AF3" or "B2"
+
+    Returns:
+        Flat metrics dict
+    """
+    stem = cif_path.stem  # filename without .cif extension
+    parent = cif_path.parent
+    if refolder == "AF3":
+        json_path = parent / f"{stem}_summary_confidences.json"
+        return parse_af3_summary(json_path)
+    elif refolder == "B2":
+        json_path = parent / f"{stem}_confidence.json"
+        return parse_b2_confidence(json_path)
+    return {}
