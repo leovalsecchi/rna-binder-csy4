@@ -123,8 +123,67 @@ Third-party tools keep their own licences, and some restrict commercial use or t
 redistribution of model weights — `LICENSE` lists which. No model parameters are
 included here.
 
-## Reproducing the analysis layer
+## Where to start
 
-The metric and selection code *is* deterministic given the archived structures, and
-that is the part worth re-running. `provenance/build_archive.sh` refreshes this tree
-from the production source.
+The generation layer cannot be reproduced design-by-design, for the reasons above. The
+**analysis layer is deterministic given structures**, and that is the part worth
+re-running. The four stages below are the whole pipeline; everything else in this tree
+is support for them.
+
+**1. Generation and re-prediction** — `pipeline/scripts/launch.py <config> --label <name>
+--num-runs <N>`, with the production YAML in `configs/`: one directory per route
+(`rfd3`, `boltzgen`, `boltzdesign`, `halludesign`, each with its `__multif` variant) and
+one per re-prediction backend (`refold__af3`, `refold__b2`, `refold__esm`). Slurm
+submission, the refold drivers and the watchers that kept them alive are in `ops/`.
+Needs the cluster, the containers in `provenance/S1.md` and the weights named there.
+
+**2. Collection and metrics** — the re-runnable part:
+
+```bash
+bash pipeline/scripts/run_analysis.sh <name> <run_dir> [<run_dir> ...]
+python3 pipeline/scripts/compute_metrics.py --dir analyses/<name> --full
+```
+
+`run_analysis.sh` drives `collect.py` (one row per design with its AF3-msaoff, Boltz-2
+and ESMFold2 re-prediction metrics) into `clean.py` (filters the raw collection, draws a
+per-stack sample) into `compute_metrics.py` (appends the structural, RNA-contact and
+H-bond columns), writing `analyses/<name>/`: `collected_raw.csv`, `collected_clean.csv`,
+`sample10k.csv`, `sample10k_metrics.csv`. The second command runs the metric pass over
+the full set rather than the sample. `aggregate_metrics.py` merges several runs into one
+table. Input is run directories holding the design and re-prediction CIFs; those are not
+in this repository — see `provenance/data_availability.md`.
+
+**3. The gate** — the filter that took 6,992,515 designs to the 55,706 that passed is
+frozen as `provenance/gate_v6_final.json` (`filter.tiers`, `filter.combine`,
+`filter.iptm`), lifted from the header of the export that produced the set.
+`analysis/binder_filter/` applies it: `store.py` loads the columnar store (one `.npy` per
+column), `filters.py` evaluates the spec, `export.py` writes the passing set as a CSV
+whose header carries the exact filter that produced it, and `app.py` is the interactive
+bench the thresholds were chosen on. Read that directory's README before trusting a
+consensus column: Boltz-2 is deliberately excluded from the filter, and the bare
+`consensus_*` columns in the master do fold it in.
+
+**4. Maps, selection and plots** — `analysis/binder_map/` builds the fold and epitope
+axes with Foldseek and does the clustering behind the library selection;
+`analysis/binder_filter/build_library_map.py` produces the ordered library;
+`analysis/plots_tools/` is the plotting suite. `analysis/campaign_kit/`,
+`analysis/metric_explorer/` and `analysis/rna_binder_gui/` are the operational tools the
+campaign was driven and inspected with, each with its own README.
+
+### Environment
+
+There is no `requirements.txt` by design: exact versions are in
+`provenance/versions.tsv`, the resolved environments in `provenance/env_manifests.md`,
+and the containers in `provenance/S1.md`, cited by sha256 digest.
+
+### One path caveat
+
+Usage lines inside the scripts (131 files) were written for the production tree, where
+the pipeline lived under `code/scripts/`. In this archive those files are
+`pipeline/scripts/`; the rest of the path is unchanged. Nothing reads those strings —
+they are comments and help text.
+
+### Rebuilding this archive
+
+`provenance/build_archive.sh` refreshes this tree from the production source. It is the
+script that produced the repository, not one a reader needs.
