@@ -361,11 +361,20 @@ rather than to the group part registry.
 `size_bp` is the full plasmid length throughout. The one derived value is
 `pART262`, 2,960 bp, whose only as-built record is a 795 bp insert window.
 
-**Eight rows carry `Redacted for privacy purposes`.** They are vectors supplied by a
-collaborator; the designs are theirs, not ours to publish. The identifiers stay, so
-that a reader tracing one of our constructs back to its backbone finds the row and
-knows why it stops there. The insert description, the plasmid length and the four
-type IIS counts are withheld.
+**Vectors supplied by a collaborator are redacted**; the designs are theirs, not ours
+to publish. This goes further than blanking their own rows, because a backbone can be
+reconstructed from the constructs built on it:
+
+- their **eight rows** carry `Redacted for privacy purposes` in place of the insert,
+  the length and the four type IIS counts;
+- their **names and architecture are removed from every other insert description**,
+  which otherwise named the backbone and listed its cassettes;
+- the **length is withheld for all 58 constructs built on one of them**, since that
+  length is mostly theirs and the insert size is given. The 29 entry and scaffold
+  plasmids keep their lengths.
+
+Identifiers stay throughout, so a reader tracing one of our constructs back to its
+backbone finds the row and sees where it stops.
 
 One check is still open and owned elsewhere: the ordered-scaffold list, the only
 thing that can confirm each `pART243`-`pART254` file name is the number that

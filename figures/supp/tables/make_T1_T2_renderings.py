@@ -19,11 +19,14 @@ TABLES = {
                "are **not** listed; the plasmids assembled from them are.",
                "`size_bp` is the full plasmid length throughout. Every value is "
                "measured from the DNA record rather than from a journal label.",
-               "**Eight rows are redacted.** They are vectors supplied by a "
-               "collaborator, and their designs are not ours to publish. The "
-               "identifiers are kept, because the methods name them and a reader "
-               "following a construct back to its backbone should find the row; the "
-               "insert, the length and the type IIS counts are withheld."],
+               "**Vectors supplied by a collaborator are redacted**, because their "
+               "designs are not ours to publish. Their eight rows carry the marker "
+               "in place of the insert, the length and the type IIS counts; "
+               "elsewhere their names and architecture are removed from the insert "
+               "descriptions, and the length is withheld for every construct built "
+               "on one of them, since that length is mostly theirs. Identifiers are "
+               "kept throughout, so a reader tracing a construct back to its "
+               "backbone finds the row and sees where it stops."],
         heads=["pART", "pLV", "Insert", "PaqCI", "BsmBI", "BsaI", "BbsI", "Size (bp)"]),
     "T2_primers": dict(
         title="T2 - primers",
