@@ -105,7 +105,8 @@ queued at session end; confirm before the campaign rerun.
   once 3039490 is green. rfd3 slices untouched.
 
 ## Files
-- Patch: `…/rna_binder/boltzgen_patch/writer.py` (+ `.orig`)
+- Patch: `…/rna_binder/boltzgen_patch/writer.py` (+ `.orig`) on the cluster; archived
+  here as `writer.py.diff`, because the file itself is BoltzGen's
 - Backups: `…/code/scripts/stages/{*_multif.sh.bak_pre_canonretry, boltzgen_multif.sh.bak_pre_routeb}`,
   `canonicalize_designs.py.bak_pre_canonretry`, `…/scripts/launch.py.bak_pre_bgargfix`
 - Recovery log: `…/rna_binder/_recovery_2026-06-11.log`

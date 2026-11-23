@@ -1,0 +1,22 @@
+# BoltzGen DesignWriter patch (Route B), as applied 2026-06-11.
+#
+# Upstream file: /app/src/boltzgen/task/predict/writer.py inside boltzgen.sif
+# (sha256 of the image is in provenance/S1.md). Two lines change; the file
+# itself is BoltzGen's and is not redistributed here. Apply with:
+#     patch -p0 < writer.py.diff
+# As run, the patched file was bind-mounted over the upstream path rather than
+# patched in place - see ROUTEB_AND_RECOVERY_2026-06-11.md.
+#
+--- writer.py.orig	2026-06-11 17:09:09
++++ writer.py	2026-06-11 17:09:10
+@@ -299,8 +299,8 @@
+                     )
+                     global_idx = sample_idx * n_samples + n
+ 
+-                    if total_files > 1:
+-                        num_digits = len(str(total_files - 1))
++                    if total_files > 1 or "data_sample_idx" in batch:
++                        num_digits = max(len(str(total_files - 1)), len(str(global_idx)), 2)
+                         file_name = (
+                             f"{stem}_{global_idx:0{num_digits}d}{self.file_suffix}"
+                         )
