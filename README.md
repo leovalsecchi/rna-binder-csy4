@@ -121,8 +121,16 @@ ordered hits. See `provenance/data_availability.md`.
 ## Licence
 
 Code in this repository: **MIT** (`LICENSE`). Deposited data: **CC-BY-4.0**
-(`LICENSE-DATA`). Cite the thesis and, once minted, the Zenodo DOI for the data
-deposit.
+(`LICENSE-DATA`).
+
+## Citation
+
+This release is archived on Zenodo: **10.5281/zenodo.24482630**
+(<https://doi.org/10.5281/zenodo.24482630>), release `v1.0-thesis-freeze`. The concept DOI
+**10.5281/zenodo.24482629** always resolves to the most recent version. Cite the version DOI
+alongside the thesis when the exact archived state matters, which in a methods
+context it usually does.
+
 
 Third-party tools keep their own licences, and some restrict commercial use or the
 redistribution of model weights — `LICENSE` lists which. No model parameters are
