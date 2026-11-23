@@ -1,0 +1,6 @@
+route,designs_generated,gpu_h_ledger_sacct,designs_per_gpu_h_ledger_sacct,designs_per_gpu_h_bench_rtx4090,gate_survivors,gate_pass_rate,panel_designs,panel_share
+RFdiffusion3 + LigandMPNN,1524796,22816.1,66.8,250,27881,"27,881/1,524,796 (1.8%)",3132,"3,132/12,000 (26.1%)"
+BoltzGen + LigandMPNN,1519958,24631.1,61.7,233,14752,"14,752/1,519,958 (0.9706%)",3266,"3,266/12,000 (27.2%)"
+BoltzGen + BoltzIF,1480140,24400.3,60.7,179,9042,"9,042/1,480,140 (0.6109%)",2400,"2,400/12,000 (20.0%)"
+BoltzDesign1 + LigandMPNN,1444614,34300.6,42.1,101,3229,"3,229/1,444,614 (0.2235%)",2400,"2,400/12,000 (20.0%)"
+HalluDesign + LigandMPNN,1023007,84576.5,12.1,44,802,"802/1,023,007 (0.0784%)",802,"802/12,000 (6.7%)"

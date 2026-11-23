@@ -1,0 +1,73 @@
+variant,stack,step,rule,remaining,pct_of_generated,pct_of_previous_step
+new_bif,RFD3+LiMPNN,generated,all collected designs,1524796,100.0,
+new_bif,RFD3+LiMPNN,g1_sc_rmsd,"sc_RMSD <= 3 A, either backend (AF3 or ESM)",109682,7.1932,7.19
+new_bif,RFD3+LiMPNN,g2_dockq,"sc_DockQ >= 0.7, either backend (AF3 or ESM)",92314,6.0542,84.17
+new_bif,RFD3+LiMPNN,g3_seq_run,longest single-residue run <= 5,52862,3.4668,57.26
+new_bif,RFD3+LiMPNN,g4_foot,"footnb_010 <= 5 binder heavy atoms, both backends [reconciliation only]",33319,2.1851,63.03
+new_bif,RFD3+LiMPNN,g5_iptm,"max(AF3, ESM) ipTM >= 0.6",27881,1.8285,83.68
+new_bif,BD1+LiMPNN,generated,all collected designs,1444614,100.0,
+new_bif,BD1+LiMPNN,g1_sc_rmsd,"sc_RMSD <= 3 A, either backend (AF3 or ESM)",8958,0.6201,0.62
+new_bif,BD1+LiMPNN,g2_dockq,"sc_DockQ >= 0.7, either backend (AF3 or ESM)",5641,0.3905,62.97
+new_bif,BD1+LiMPNN,g3_seq_run,longest single-residue run <= 5,5595,0.3873,99.18
+new_bif,BD1+LiMPNN,g4_foot,"footnb_010 <= 5 binder heavy atoms, both backends [reconciliation only]",4217,0.2919,75.37
+new_bif,BD1+LiMPNN,g5_iptm,"max(AF3, ESM) ipTM >= 0.6",3229,0.2235,76.57
+new_bif,HD+LiMPNN,generated,all collected designs,1023007,100.0,
+new_bif,HD+LiMPNN,g1_sc_rmsd,"sc_RMSD <= 3 A, either backend (AF3 or ESM)",1326,0.1296,0.13
+new_bif,HD+LiMPNN,g2_dockq,"sc_DockQ >= 0.7, either backend (AF3 or ESM)",922,0.0901,69.53
+new_bif,HD+LiMPNN,g3_seq_run,longest single-residue run <= 5,879,0.0859,95.34
+new_bif,HD+LiMPNN,g4_foot,"footnb_010 <= 5 binder heavy atoms, both backends [reconciliation only]",862,0.0843,98.07
+new_bif,HD+LiMPNN,g5_iptm,"max(AF3, ESM) ipTM >= 0.6",802,0.0784,93.04
+new_bif,BG+BIF,generated,all collected designs,1480140,100.0,
+new_bif,BG+BIF,g1_sc_rmsd,"sc_RMSD <= 3 A, either backend (AF3 or ESM)",18577,1.2551,1.26
+new_bif,BG+BIF,g2_dockq,"sc_DockQ >= 0.7, either backend (AF3 or ESM)",14315,0.9671,77.06
+new_bif,BG+BIF,g3_seq_run,longest single-residue run <= 5,14045,0.9489,98.11
+new_bif,BG+BIF,g4_foot,"footnb_010 <= 5 binder heavy atoms, both backends [reconciliation only]",10356,0.6997,73.73
+new_bif,BG+BIF,g5_iptm,"max(AF3, ESM) ipTM >= 0.6",9515,0.6428,91.88
+new_bif,BG+LiMPNN,generated,all collected designs,1519958,100.0,
+new_bif,BG+LiMPNN,g1_sc_rmsd,"sc_RMSD <= 3 A, either backend (AF3 or ESM)",27476,1.8077,1.81
+new_bif,BG+LiMPNN,g2_dockq,"sc_DockQ >= 0.7, either backend (AF3 or ESM)",22828,1.5019,83.08
+new_bif,BG+LiMPNN,g3_seq_run,longest single-residue run <= 5,21880,1.4395,95.85
+new_bif,BG+LiMPNN,g4_foot,"footnb_010 <= 5 binder heavy atoms, both backends [reconciliation only]",15821,1.0409,72.31
+new_bif,BG+LiMPNN,g5_iptm,"max(AF3, ESM) ipTM >= 0.6",14752,0.9706,93.24
+new_bif,ALL,generated,all collected designs,6992515,100.0,
+new_bif,ALL,g1_sc_rmsd,"sc_RMSD <= 3 A, either backend (AF3 or ESM)",166019,2.3742,2.37
+new_bif,ALL,g2_dockq,"sc_DockQ >= 0.7, either backend (AF3 or ESM)",136020,1.9452,81.93
+new_bif,ALL,g3_seq_run,longest single-residue run <= 5,95261,1.3623,70.03
+new_bif,ALL,g4_foot,"footnb_010 <= 5 binder heavy atoms, both backends [reconciliation only]",64575,0.9235,67.79
+new_bif,ALL,g5_iptm,"max(AF3, ESM) ipTM >= 0.6",56179,0.8034,87.0
+old_bif,RFD3+LiMPNN,generated,all collected designs,1524796,100.0,
+old_bif,RFD3+LiMPNN,g1_sc_rmsd,"sc_RMSD <= 3 A, either backend (AF3 or ESM)",109682,7.1932,7.19
+old_bif,RFD3+LiMPNN,g2_dockq,"sc_DockQ >= 0.7, either backend (AF3 or ESM)",92314,6.0542,84.17
+old_bif,RFD3+LiMPNN,g3_seq_run,longest single-residue run <= 5,52862,3.4668,57.26
+old_bif,RFD3+LiMPNN,g4_foot,"footnb_010 <= 5 binder heavy atoms, both backends [reconciliation only]",33319,2.1851,63.03
+old_bif,RFD3+LiMPNN,g5_iptm,"max(AF3, ESM) ipTM >= 0.6",27881,1.8285,83.68
+old_bif,BD1+LiMPNN,generated,all collected designs,1444614,100.0,
+old_bif,BD1+LiMPNN,g1_sc_rmsd,"sc_RMSD <= 3 A, either backend (AF3 or ESM)",8958,0.6201,0.62
+old_bif,BD1+LiMPNN,g2_dockq,"sc_DockQ >= 0.7, either backend (AF3 or ESM)",5641,0.3905,62.97
+old_bif,BD1+LiMPNN,g3_seq_run,longest single-residue run <= 5,5595,0.3873,99.18
+old_bif,BD1+LiMPNN,g4_foot,"footnb_010 <= 5 binder heavy atoms, both backends [reconciliation only]",4217,0.2919,75.37
+old_bif,BD1+LiMPNN,g5_iptm,"max(AF3, ESM) ipTM >= 0.6",3229,0.2235,76.57
+old_bif,HD+LiMPNN,generated,all collected designs,1023007,100.0,
+old_bif,HD+LiMPNN,g1_sc_rmsd,"sc_RMSD <= 3 A, either backend (AF3 or ESM)",1326,0.1296,0.13
+old_bif,HD+LiMPNN,g2_dockq,"sc_DockQ >= 0.7, either backend (AF3 or ESM)",922,0.0901,69.53
+old_bif,HD+LiMPNN,g3_seq_run,longest single-residue run <= 5,879,0.0859,95.34
+old_bif,HD+LiMPNN,g4_foot,"footnb_010 <= 5 binder heavy atoms, both backends [reconciliation only]",862,0.0843,98.07
+old_bif,HD+LiMPNN,g5_iptm,"max(AF3, ESM) ipTM >= 0.6",802,0.0784,93.04
+old_bif,BG+BIF,generated,all collected designs,1480140,100.0,
+old_bif,BG+BIF,g1_sc_rmsd,"sc_RMSD <= 3 A, either backend (AF3 or ESM)",24401,1.6486,1.65
+old_bif,BG+BIF,g2_dockq,"sc_DockQ >= 0.7, either backend (AF3 or ESM)",12158,0.8214,49.83
+old_bif,BG+BIF,g3_seq_run,longest single-residue run <= 5,11806,0.7976,97.1
+old_bif,BG+BIF,g4_foot,"footnb_010 <= 5 binder heavy atoms, both backends [reconciliation only]",9966,0.6733,84.41
+old_bif,BG+BIF,g5_iptm,"max(AF3, ESM) ipTM >= 0.6",9042,0.6109,90.73
+old_bif,BG+LiMPNN,generated,all collected designs,1519958,100.0,
+old_bif,BG+LiMPNN,g1_sc_rmsd,"sc_RMSD <= 3 A, either backend (AF3 or ESM)",27476,1.8077,1.81
+old_bif,BG+LiMPNN,g2_dockq,"sc_DockQ >= 0.7, either backend (AF3 or ESM)",22828,1.5019,83.08
+old_bif,BG+LiMPNN,g3_seq_run,longest single-residue run <= 5,21880,1.4395,95.85
+old_bif,BG+LiMPNN,g4_foot,"footnb_010 <= 5 binder heavy atoms, both backends [reconciliation only]",15821,1.0409,72.31
+old_bif,BG+LiMPNN,g5_iptm,"max(AF3, ESM) ipTM >= 0.6",14752,0.9706,93.24
+old_bif,ALL,generated,all collected designs,6992515,100.0,
+old_bif,ALL,g1_sc_rmsd,"sc_RMSD <= 3 A, either backend (AF3 or ESM)",171843,2.4575,2.46
+old_bif,ALL,g2_dockq,"sc_DockQ >= 0.7, either backend (AF3 or ESM)",133863,1.9144,77.9
+old_bif,ALL,g3_seq_run,longest single-residue run <= 5,93022,1.3303,69.49
+old_bif,ALL,g4_foot,"footnb_010 <= 5 binder heavy atoms, both backends [reconciliation only]",64185,0.9179,69.0
+old_bif,ALL,g5_iptm,"max(AF3, ESM) ipTM >= 0.6",55706,0.7967,86.79

@@ -31,5 +31,9 @@ logs/
 *.pt
 *.bin
 
-# provenance/versions.tsv is the one tracked table.
+# Tracked tables, by exception. The rule above is for campaign data; these are
+# small result tables that belong with the code that writes or renders them.
 !provenance/versions.tsv
+!figures/supp/tables/*.csv
+!figures/supp/tables/sources/*.csv
+!figures/Fig3e_gpu_efficiency/methods/sources/gate/*.csv
