@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""versions.tsv -> Supplementary Table S1 (markdown), written next to it as S1.md.
+"""versions.tsv -> the software and container table, written beside it as
+software_versions.md.
 
-Methods cites S1 from three places, so it is generated rather than retyped.
+The README and the Methods cite that table from several places, so it is generated
+rather than retyped. It was called S1.md until 2026-11-23, after an earlier
+supplement numbering; the supplement's own container inventory is a narrower cut.
 Rows whose status is not_recoverable are kept and marked; an omitted row would
 read as an absent dependency rather than an unrecoverable one.
 """
@@ -35,7 +38,13 @@ def cell(row, key):
 def main():
     rs = list(rows())
     assert rs, "versions.tsv parsed to zero rows"
-    out = ["# Supplementary Table S1 — software, containers and parameter sets", ""]
+    out = ["# Software, containers and parameter sets", "",
+           "One row per pipeline stage: tool, version, commit, container image and its",
+           "sha256 digest, the weights it loaded and the configuration it ran under. The",
+           "supplement's container inventory (Supplementary Table S4) is a narrower,",
+           "per-image cut of the same material; this file is the fuller per-stage version",
+           "and is the one the archive cites. It was called `S1.md` until 2026-11-23,",
+           "after an earlier supplement numbering.", ""]
     out.append("| " + " | ".join(h for _, h in COLS) + " |")
     out.append("|" + "|".join(["---"] * len(COLS)) + "|")
     for r in rs:
@@ -49,8 +58,8 @@ def main():
 
     out += ["", "Image dates are filesystem modification times: they record when an image was",
             "placed in the container store, not when the upstream release was cut.", ""]
-    (HERE / "S1.md").write_text("\n".join(out))
-    print(f"S1.md: {len(rs)} rows, {len(missing)} not recoverable")
+    (HERE / "software_versions.md").write_text("\n".join(out))
+    print(f"software_versions.md: {len(rs)} rows, {len(missing)} not recoverable")
 
 
 if __name__ == "__main__":

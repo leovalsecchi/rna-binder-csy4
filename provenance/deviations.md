@@ -3,7 +3,7 @@
 The campaign ran from May to August 2026 and the pipeline changed while it ran. A
 design's properties therefore depend on **when** it was generated, not only on which
 stack generated it. This file records every change that alters what a stored number
-means. It is the companion to `S1.md`: S1 says what the software was, this says what it
+means. It is the companion to `software_versions.md`: that says what the software was, this says what it
 did differently before a given date.
 
 Dates are the date the change took effect in production.

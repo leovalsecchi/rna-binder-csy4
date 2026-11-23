@@ -1,4 +1,11 @@
-# Supplementary Table S1 — software, containers and parameter sets
+# Software, containers and parameter sets
+
+One row per pipeline stage: tool, version, commit, container image and its
+sha256 digest, the weights it loaded and the configuration it ran under. The
+supplement's container inventory (Supplementary Table S4) is a narrower,
+per-image cut of the same material; this file is the fuller per-stage version
+and is the one the archive cites. It was called `S1.md` until 2026-11-23,
+after an earlier supplement numbering.
 
 | Stage | Tool | Version | Commit | Container image | Image date | Image sha256 | Weights / parameters | Configuration as run |
 |---|---|---|---|---|---|---|---|---|

@@ -1,7 +1,7 @@
 # BoltzGen DesignWriter patch (Route B), as applied 2026-06-11.
 #
 # Upstream file: /app/src/boltzgen/task/predict/writer.py inside boltzgen.sif
-# (sha256 of the image is in provenance/S1.md). Two lines change; the file
+# (sha256 of the image is in provenance/software_versions.md). Two lines change; the file
 # itself is BoltzGen's and is not redistributed here. Apply with:
 #     patch -p0 < writer.py.diff
 # As run, the patched file was bind-mounted over the upstream path rather than

@@ -47,9 +47,11 @@ targets/             the Csy4 target itself: 4AL5-derived coordinates, the 16-nt
 configs/             production YAML for all five stacks and three refold backends
 ops/                 Slurm submission, refold drivers, watchers, aggregation, loops
 analysis/            plotting suite, campaign kit
+figures/             the figure and supplementary-table code: one directory per
+                     panel, plus the shared style module (see figures/README.md)
 patches/             modifications applied to third-party tools (see below)
 docs/                design and findings notes cited by the Methods chapter
-provenance/          Supplementary Table S1, deviation timeline, the filter gate as
+provenance/          software and container versions, deviation timeline, the gate as
                      JSON, container deffiles, environment manifests, build script
 ```
 
@@ -75,7 +77,7 @@ which designs it affects.
 
 Model execution was containerised (`apptainer exec --nv`). Images are 3.5–15.7 GB and
 are not in this repository; they are deposited separately and cited by sha256 digest in
-`provenance/S1.md`. All nine production images have been hashed.
+`provenance/software_versions.md`. All nine production images have been hashed.
 
 `provenance/container_recipes/` holds the Apptainer definition file for all nine, plus
 the Dockerfile recovered from inside `boltz_design1.sif`. Be aware what those deffiles
@@ -135,7 +137,7 @@ is support for them.
 (`rfd3`, `boltzgen`, `boltzdesign`, `halludesign`, each with its `__multif` variant) and
 one per re-prediction backend (`refold__af3`, `refold__b2`, `refold__esm`). Slurm
 submission, the refold drivers and the watchers that kept them alive are in `ops/`.
-Needs the cluster, the containers in `provenance/S1.md` and the weights named there.
+Needs the cluster, the containers in `provenance/software_versions.md` and the weights named there.
 
 **2. Collection and metrics** — the re-runnable part:
 
@@ -174,7 +176,7 @@ campaign was driven and inspected with, each with its own README.
 
 There is no `requirements.txt` by design: exact versions are in
 `provenance/versions.tsv`, the resolved environments in `provenance/env_manifests.md`,
-and the containers in `provenance/S1.md`, cited by sha256 digest.
+and the containers in `provenance/software_versions.md`, cited by sha256 digest.
 
 ### One path caveat
 

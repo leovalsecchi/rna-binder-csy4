@@ -1,7 +1,8 @@
 # Drafted Methods text
 
 Two passages for the Notion chapter. Past tense, passive, per HST guidelines 4.5.
-Placeholders in `«»` need a value before submission.
+Placeholders in `«»` need a value before submission. As of 2026-11-23 only the Zenodo
+DOI is still open; the repository, release and freeze date are filled in below.
 
 ---
 
@@ -31,15 +32,16 @@ nodelist, GRES and walltime — together with the per-job HalluDesign seed, so e
 ## §2.13.5 Code and data availability — full replacement
 
 > Pipeline source code, configuration files and the modifications applied to third-party
-> design tools were archived at the computational data freeze on «freeze date» and are
-> available at «repository URL», release «tag», archived under «Zenodo DOI». The archive
+> design tools were archived at the computational data freeze on 15 November 2026
+> and are available at https://github.com/leovalsecchi/rna-binder-csy4, release
+> v1.0-thesis-freeze, archived under «Zenodo DOI». The archive
 > is an as-run snapshot of the production tree rather than a development history: the
 > pipeline was not under version control while the campaigns ran, and the snapshot
 > records the state of the code at the freeze. Container images, which range from 3.5 to
 > 15.7 GB, are deposited separately under «Zenodo DOI» and are cited by digest in
-> Supplementary Table S1. Mid-campaign changes to generation and metric code that affect
+> Supplementary Table S4. Mid-campaign changes to generation and metric code that affect
 > the interpretation of stored values are documented in the archive's deviation record
-> and summarised in «Supplementary Table S2».
+> (`provenance/deviations.md`).
 >
 > Design coordinates, metric tables and selection outputs are held on the ETH Zurich
 > Euler cluster under `/cluster/work/wicky/lvalsecchi/rna_binder/`, mirrored nightly to

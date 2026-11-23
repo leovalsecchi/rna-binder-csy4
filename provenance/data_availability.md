@@ -8,7 +8,7 @@ what is not kept at all.
 | Deposit | Contents | Approximate size |
 |---|---|---|
 | Reduced dataset | The gated design set (55,706 designs passing the five-criterion cascade), the 12,000-member ordered library, and the characterised hits with their measured values | tens of MB |
-| Container images | The Apptainer images listed in `S1.md`, cited by sha256 digest | ~60 GB |
+| Container images | The Apptainer images listed in `software_versions.md`, cited by sha256 digest | ~60 GB |
 | This code archive | `README.md` describes the contents | ~5 MB |
 
 The reduced dataset is the useful unit: it is what every figure in the chapter is drawn

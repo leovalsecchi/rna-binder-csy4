@@ -1,4 +1,4 @@
-#	Supplementary Table S1 source of truth. One row per executed component.
+#	software_versions.md source of truth. One row per executed component.
 #	status: verified = read out of the image, config or checkpoint at the stated evidence path.
 #	        not_recoverable = no version string survives anywhere; cite the image digest instead.
 #	sha256 digests computed on Euler 2026-11-15 (Slurm job 21003599) over the images as stored.
