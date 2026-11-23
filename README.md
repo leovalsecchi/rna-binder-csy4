@@ -125,9 +125,10 @@ Code in this repository: **MIT** (`LICENSE`). Deposited data: **CC-BY-4.0**
 
 ## Citation
 
-This release is archived on Zenodo. Cite the version DOI for that release
-alongside the thesis; it is given in the thesis's code and data availability
-statement and in `provenance/data_availability.md`.
+This release is archived on Zenodo: **10.5281/zenodo.24485695** (<https://doi.org/10.5281/zenodo.24485695>),
+release `v1.0-thesis-freeze`. The concept DOI **10.5281/zenodo.24485694** always resolves
+to the most recent version. Cite the version DOI alongside the thesis when the
+exact archived state matters, which in a methods context it usually does.
 
 ## Where to start
 
