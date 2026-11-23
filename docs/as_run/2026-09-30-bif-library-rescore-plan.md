@@ -1,6 +1,5 @@
 # BG+BIF Library Rescore Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Determine how many of the 2,400 BG+BIF designs in the delivered 12k library fail the campaign's own gate when scored against the true BoltzGen backbone instead of against BIF's own re-prediction.
 

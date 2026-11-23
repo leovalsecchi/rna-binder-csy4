@@ -1,6 +1,5 @@
 # Seed Self-Consistency Test — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Measure how reproducible each refold backend is by folding 2,000 designs (400 random per stack) 5 times each on AF3, Boltz-2 and ESMFold2, then quantifying pose agreement (pairwise DockQ) and confidence spread (iPTM/pTM/pLDDT).
 
