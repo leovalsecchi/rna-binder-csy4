@@ -7,15 +7,37 @@ what is not kept at all.
 
 | Deposit | Contents | Approximate size |
 |---|---|---|
+| This code archive | The pipeline, the figure and supplementary-table code, and this provenance record; `README.md` describes the contents | ~9 MB |
 | Reduced dataset | The gated design set (55,706 designs passing the five-criterion cascade), the 12,000-member ordered library, and the characterised hits with their measured values | tens of MB |
-| Container images | The Apptainer images listed in `software_versions.md`, cited by sha256 digest | ~60 GB |
-| This code archive | `README.md` describes the contents | ~5 MB |
+
+The code archive is at https://github.com/leovalsecchi/rna-binder-csy4, release
+`v1.0-thesis-freeze`; the DOI minted for that release is cited in the thesis's code and
+data availability statement.
 
 The reduced dataset is the useful unit: it is what every figure in the chapter is drawn
 from, and it is small enough to deposit whole. The deposit carries the metric columns as
 computed, including the corrections in `deviations.md` — in particular the `*_true`
 columns for BG+BIF, since the stored `sc_RMSD` and `DockQ` values for that stack are
 measured against a re-prediction rather than the designed backbone.
+
+## Not deposited: the container images
+
+The nine production images are **not** deposited. Together they are about 60 GB, which
+is past what a single repository record takes, and several carry model weights whose
+licences do not permit redistribution — the AlphaFold3 parameters in particular are used
+under Google DeepMind's terms and are neither included nor redistributable.
+
+They are identified instead by **sha256 digest** in `software_versions.md`, which also
+records the tool version, the commit where one exists, and the weights each image
+loaded. `container_recipes/` holds a definition file for each, but be clear about what those
+are worth: only `foundry_0.1.9.def` carries real build steps, and the rest are two-line
+pointers at sources that in most cases no longer resolve — local Docker daemon tags, a
+deleted `docker-archive` tar, a sandbox directory that is gone. **No image is rebuildable
+from its recipe**, which is why the digest, not the deffile, is the identifier.
+
+A digest identifies an image; it does not reconstitute one. Anyone needing a byte-exact
+environment should ask for the images directly; they are held with the rest of the
+campaign on institutional storage.
 
 ## Retained on institutional storage
 

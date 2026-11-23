@@ -38,8 +38,9 @@ nodelist, GRES and walltime — together with the per-job HalluDesign seed, so e
 > is an as-run snapshot of the production tree rather than a development history: the
 > pipeline was not under version control while the campaigns ran, and the snapshot
 > records the state of the code at the freeze. Container images, which range from 3.5 to
-> 15.7 GB, are deposited separately under «Zenodo DOI» and are cited by digest in
-> Supplementary Table S4. Mid-campaign changes to generation and metric code that affect
+> 15.7 GB and in several cases carry model weights that may not be redistributed, are
+> not deposited; each is identified by its sha256 digest in Supplementary Table S4, and
+> the build definitions are included in the archive. Mid-campaign changes to generation and metric code that affect
 > the interpretation of stored values are documented in the archive's deviation record
 > (`provenance/deviations.md`).
 >

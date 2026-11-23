@@ -76,7 +76,8 @@ which designs it affects.
 ## Containers
 
 Model execution was containerised (`apptainer exec --nv`). Images are 3.5–15.7 GB and
-are not in this repository; they are deposited separately and cited by sha256 digest in
+are neither in this repository nor deposited: together they are about 60 GB, and several
+carry model weights that may not be redistributed. They are cited by sha256 digest in
 `provenance/software_versions.md`. All nine production images have been hashed.
 
 `provenance/container_recipes/` holds the Apptainer definition file for all nine, plus
@@ -90,9 +91,11 @@ after the fact; `esmc.sif` points at a `docker-archive` tar that was deleted; an
 `af3_protenix_esm.sif` points at a sandbox directory that no longer exists.
 
 So no image here is rebuildable from its recipe. The digest is the identifier that
-matters, and the deposited images are the artefact. Two components additionally have no
-recoverable version string at all: the Protenix distribution inside
-`af3_protenix_esm.sif`, and `esmc.sif` beyond its package list.
+matters, and the images themselves are the artefact — held on institutional storage,
+not deposited. Anyone needing a byte-exact environment should ask for them.
+
+Two components additionally have no recoverable version string at all: the Protenix
+distribution inside `af3_protenix_esm.sif`, and `esmc.sif` beyond its package list.
 
 ## The filter gate
 
