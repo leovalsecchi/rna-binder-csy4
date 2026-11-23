@@ -1,0 +1,22 @@
+{
+  "upload_type": "software",
+  "title": "De novo protein binders to the Csy4 crRNA hairpin: pipeline archive",
+  "description": "<p>As-run code archive for the computational arm of the thesis <em>De novo design of RNA-binding proteins targeting the Csy4 crRNA hairpin</em>: five generative design stacks, three structure re-prediction backends, the interface metric suite computed over them, and the filter cascade that reduced 6,992,515 designs to the 12,000-member library sent to synthesis.</p><p>This is a snapshot of the production tree at the computational data freeze, not a reconstructed history: every configuration file is the file that ran. It documents the pipeline but will not regenerate the dataset, because no stack used is seed-reproducible at the level of an individual design. See README.md for what the archive can and cannot do, and provenance/ for container digests, environment manifests, the selection gate and the recorded deviations.</p><p>Code is MIT-licensed; deposited data is CC-BY-4.0. Third-party tools (RFdiffusion3, BoltzGen, BoltzDesign1, LigandMPNN, AlphaFold3, Boltz-2, ESM, DockQ, PyRosetta, PyFurnace) carry their own licences and are neither included nor redistributed here.</p>",
+  "creators": [
+    { "name": "Valsecchi, Leo", "affiliation": "ETH Zurich" }
+  ],
+  "license": "MIT",
+  "access_right": "open",
+  "keywords": [
+    "de novo protein design",
+    "RNA-binding proteins",
+    "Csy4",
+    "crRNA hairpin",
+    "RFdiffusion3",
+    "BoltzGen",
+    "BoltzDesign1",
+    "LigandMPNN",
+    "AlphaFold3",
+    "protein-RNA interface"
+  ]
+}
