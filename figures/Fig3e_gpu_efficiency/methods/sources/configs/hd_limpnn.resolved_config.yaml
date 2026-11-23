@@ -1,0 +1,51 @@
+config_name: random_init
+container:
+  apptainer_cmd: run
+  binds:
+  - /cluster/work/wicky:/cluster/work/wicky
+  - /cluster/software:/cluster/software:ro
+  - /cluster/software/manual/cuda/13.0.2/x86_64:/usr/local/cuda-real:ro
+  envs:
+    CUDA_HOME: /usr/local/cuda-real
+    CUTLASS_PATH: /cluster/work/wicky/lvalsecchi/rna_binder/containers/cutlass
+    DS_SKIP_CUDA_CHECK: '1'
+    LD_LIBRARY_PATH: /usr/local/cuda-real/lib64:/.singularity.d/libs
+    MPLCONFIGDIR: /cluster/work/wicky/lvalsecchi/rna_binder/containers/runtime_cache/matplotlib
+    PYTHONPATH: /cluster/work/wicky/lvalsecchi/rna_binder/containers/protenix_pkg
+    PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    TMPDIR: /cluster/work/wicky/lvalsecchi/rna_binder/containers/runtime_home/tmp
+    WANDB_MODE: offline
+    XDG_CACHE_HOME: /cluster/work/wicky/lvalsecchi/rna_binder/containers/runtime_cache
+    XDG_CONFIG_HOME: /cluster/work/wicky/lvalsecchi/rna_binder/containers/runtime_config
+  home: /cluster/work/wicky/lvalsecchi/rna_binder/containers/runtime_home
+  nv: true
+  sif: /cluster/work/wicky/lvalsecchi/rna_binder/containers/af3_protenix_esm.sif
+generator: halludesign
+generator_params:
+  entrypoint: python ./HalluDesign_run.py
+  params:
+    HalluDesign_model: cross_model
+    extra_json_path: /cluster/work/wicky/lvalsecchi/rna_binder/targets/csy4_crrna_free/template_af3.json
+    fix_chain_index: B
+    mpnn: ligand_mpnn
+    mpnn_num_packs: 1
+    num_designs: 1
+    num_recycles: 15
+    num_seqs: 10
+    random_init: true
+    random_init_chain_spec: A:80
+    ref_time_steps: 60
+    rna: CACUGCCGUAUAGGCAGC
+    seed: 900001
+    template_path: /cluster/work/wicky/lvalsecchi/rna_binder/targets/csy4_crrna_free/template_protenix.json
+  workdir: /cluster/work/wicky/lvalsecchi/halludesign_upgrade
+inverse_folder: ligandmpnn
+slurm:
+  gpus: rtx_4090:1
+  job_name: csy4_free_xm_denovo
+  mem_per_cpu: 7G
+  nodes: 1
+  ntasks: 4
+  partition: gpuhe.24h
+  time: '23:30:00'
+target_id: csy4_crrna_free

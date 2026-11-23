@@ -1,0 +1,253 @@
+{
+  "tiers": {
+    "t1": {
+      "op": "AND",
+      "groups": [
+        {
+          "key": "rmsd",
+          "op": "OR",
+          "atoms": [
+            {
+              "metric": "rmsd",
+              "backend": "af3",
+              "cmp": "<=",
+              "value": 3,
+              "on": true
+            },
+            {
+              "metric": "rmsd",
+              "backend": "esm",
+              "cmp": "<=",
+              "value": 3,
+              "on": true
+            }
+          ]
+        },
+        {
+          "key": "dockq",
+          "op": "OR",
+          "atoms": [
+            {
+              "metric": "dockq",
+              "backend": "af3",
+              "cmp": ">=",
+              "value": 0.7,
+              "on": true
+            },
+            {
+              "metric": "dockq",
+              "backend": "esm",
+              "cmp": ">=",
+              "value": 0.7,
+              "on": true
+            }
+          ]
+        }
+      ]
+    },
+    "t3": {
+      "op": "AND",
+      "atoms": [],
+      "groups": [
+        {
+          "key": "seq_kmer",
+          "op": "AND",
+          "atoms": [
+            {
+              "metric": "seq_kmer",
+              "backend": null,
+              "cmp": "<=",
+              "value": 6,
+              "on": false
+            }
+          ]
+        },
+        {
+          "key": "seq_run",
+          "op": "AND",
+          "atoms": [
+            {
+              "metric": "seq_run",
+              "backend": null,
+              "cmp": "<=",
+              "value": 5,
+              "on": true
+            }
+          ]
+        },
+        {
+          "key": "seq_max_aa_frac",
+          "op": "AND",
+          "atoms": [
+            {
+              "metric": "seq_max_aa_frac",
+              "backend": null,
+              "cmp": "<=",
+              "value": 0.35,
+              "on": false
+            }
+          ]
+        },
+        {
+          "key": "rog",
+          "op": "AND",
+          "atoms": [
+            {
+              "metric": "rog",
+              "backend": "af3",
+              "cmp": "<=",
+              "value": 15,
+              "on": false
+            },
+            {
+              "metric": "rog",
+              "backend": "esm",
+              "cmp": "<=",
+              "value": 15,
+              "on": false
+            }
+          ]
+        },
+        {
+          "key": "hb",
+          "op": "AND",
+          "atoms": [
+            {
+              "metric": "hb",
+              "backend": "af3",
+              "cmp": ">=",
+              "value": 2,
+              "on": false
+            },
+            {
+              "metric": "hb",
+              "backend": "esm",
+              "cmp": ">=",
+              "value": 2,
+              "on": false
+            }
+          ]
+        },
+        {
+          "key": "pis",
+          "op": "AND",
+          "atoms": [
+            {
+              "metric": "pis",
+              "backend": "af3",
+              "cmp": ">=",
+              "value": 0.1,
+              "on": false
+            },
+            {
+              "metric": "pis",
+              "backend": "esm",
+              "cmp": ">=",
+              "value": 0.1,
+              "on": false
+            }
+          ]
+        },
+        {
+          "key": "foot",
+          "op": "AND",
+          "atoms": [
+            {
+              "metric": "foot",
+              "backend": "af3",
+              "cmp": ">=",
+              "value": 3.4,
+              "on": false
+            },
+            {
+              "metric": "foot",
+              "backend": "esm",
+              "cmp": ">=",
+              "value": 3.4,
+              "on": false
+            }
+          ]
+        },
+        {
+          "key": "pose_disagree",
+          "op": "AND",
+          "atoms": [
+            {
+              "metric": "pose_disagree",
+              "backend": null,
+              "cmp": "<=",
+              "value": 10,
+              "on": false
+            }
+          ]
+        },
+        {
+          "key": "fold_disagree",
+          "op": "AND",
+          "atoms": [
+            {
+              "metric": "fold_disagree",
+              "backend": null,
+              "cmp": "<=",
+              "value": 5,
+              "on": false
+            }
+          ]
+        },
+        {
+          "key": "dsasa",
+          "op": "AND",
+          "atoms": [
+            {
+              "metric": "dsasa",
+              "backend": "af3",
+              "cmp": ">=",
+              "value": 1200,
+              "on": false
+            },
+            {
+              "metric": "dsasa",
+              "backend": "esm",
+              "cmp": ">=",
+              "value": 1200,
+              "on": false
+            }
+          ]
+        },
+        {
+          "key": "footnb",
+          "op": "AND",
+          "atoms": [
+            {
+              "metric": "footnb",
+              "backend": "af3",
+              "cmp": "<=",
+              "value": 5,
+              "on": true,
+              "variant": "010"
+            },
+            {
+              "metric": "footnb",
+              "backend": "esm",
+              "cmp": "<=",
+              "value": 5,
+              "on": true,
+              "variant": "010"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "combine": "AND",
+  "iptm": {
+    "on": true,
+    "value": "max",
+    "mode": "threshold",
+    "threshold": 0.6,
+    "rank_kind": "n",
+    "rank_n": 10000,
+    "rank_pct": 20,
+    "scope": "filtered"
+  }
+}

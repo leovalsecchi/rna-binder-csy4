@@ -1,0 +1,49 @@
+config_kind: multif
+config_name: default
+container:
+  apptainer_cmd: exec
+  bd1_sif: /cluster/work/wicky/containers/boltz_design1.sif
+  binds:
+  - /cluster/work/wicky
+  - /cluster/software
+  boltz_cache: /cluster/work/wicky/lvalsecchi/rna_binder/_cache/boltz_design1
+  ligandmpnn_sif: /cluster/work/wicky/containers/LigandMPNN.sif
+  ligandmpnn_weights: /cluster/work/wicky/params/foundry/ligandmpnn_v_32_010_25.pt
+  nv: true
+generator: boltzdesign
+generator_params:
+  boltz_checkpoint: /cluster/work/wicky/params/boltz/boltz1_conf.ckpt
+  ccd_path: /cluster/work/wicky/params/boltz/ccd.pkl
+  complex_plddt_cutoff: 0.0
+  design_samples: 60
+  i_ptm_cutoff: 0.0
+  inter_chain_cutoff: 10
+  length_max: 80
+  length_min: 80
+  mpnn_cli:
+    batch_size: 10
+    chains_to_design: A
+    number_of_batches: 1
+    omit_AA: C
+    seed: 42
+    temperature: 0.1
+  pdb_path: /cluster/work/wicky/lvalsecchi/rna_binder/targets/csy4_crrna_free/csy4_rna_only.pdb
+  pdb_target_ids: B
+  run_alphafold: 'False'
+  run_ligandmpnn: 'False'
+  run_rosetta: 'False'
+  show_animation: 'False'
+  suffix: default
+  target_name: csy4_rna
+  target_type: rna
+inverse_folders:
+- ligandmpnn
+slurm:
+  cpus_per_task: 4
+  gpus: rtx_4090:1
+  job_name: bd1_multif
+  mem_per_cpu: 5G
+  partition: gpuhe.24h
+  time: '23:30:00'
+  tmp: 25G
+target_id: csy4_crrna_free

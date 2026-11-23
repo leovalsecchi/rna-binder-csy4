@@ -1,0 +1,32 @@
+config_kind: multif
+config_name: default
+container:
+  activate_script: /cluster/work/wicky/lvalsecchi/rfdiffusion3/activate/foundry.activate.sh
+  ligandmpnn_sif: /cluster/work/wicky/containers/LigandMPNN.sif
+  ligandmpnn_weights: /cluster/work/wicky/params/foundry/ligandmpnn_v_32_010_25.pt
+  rfd3_sif: /cluster/work/wicky/containers/foundry.sif
+generator: rfd3
+generator_params:
+  cwd: /cluster/work/wicky/lvalsecchi/rfdiffusion3/examples/rna
+  diffusion_batch_size: 8
+  inputs: /cluster/work/wicky/lvalsecchi/rfdiffusion3/examples/rna/csy4_crrna.json
+  mpnn_cli:
+    batch_size: 10
+    chains_to_design: A
+    number_of_batches: 1
+    omit_AA: C
+    seed: 42
+    temperature: 0.1
+  n_batches: 8
+  prevalidate_inputs: true
+  skip_existing: false
+inverse_folders:
+- ligandmpnn
+slurm:
+  cpus_per_task: 4
+  gpus: rtx_4090:1
+  job_name: rfd3_multif
+  mem_per_cpu: 5G
+  partition: gpuhe.24h
+  time: 04:00:00
+target_id: csy4_crrna_free

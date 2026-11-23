@@ -1,0 +1,263 @@
+"""Fig3d: how the two selection rules differ in what they pick.
+
+  b  fold diversity: how many of the pool's fold clusters each rule holds,
+     against an equal-sized random draw from the same pool.
+  c  what each rule does to the stack mix: the share of each set coming from
+     each generator, campaign against the two selections.
+
+Cluster count against a random-draw null is the diversity convention in the
+structure-generation literature (Foldseek clusters at TM 0.5). It replaced two
+attempts at the same question through secondary structure, both of which died
+on the same fact: 74% of the library and 84% of ipTM have no strand at all.
+Helix content could not separate beta-rich from floppy, and an alpha/beta
+balance axis turned that 74/84% into a point mass the smoother drew as a wall.
+Fold clusters sidestep secondary structure altogether. The class split is
+still printed, since binning is the honest way to show a point mass.
+
+Cut on 2026-11-11, in git history if they are wanted back:
+  a  the map of which rule holds each backbone, over generator territories
+  c  the log2 abundance ratio per fold cluster, by dominant generator
+and with them the difference-in-density strip under the violin. The helix
+violin that stood where b is went the same way on 2026-11-12, replaced by the
+balance one; the column chart took the lower-right slot the old c had. The
+left column is still deliberately empty: something new goes there.
+
+Warm is library, cool is ipTM.
+
+NO P-VALUES. Both arms are deterministic selections from one pool, so there is
+no sampling error to test. Every number here is descriptive.
+
+Data: inputs/sse_arms.csv, inputs/funnel_real_gate_v2.csv,
+      inputs/counterfactual3.csv.
+Writes output/Fig3d_selection_difference/selection_difference.{svg,pdf,png}.
+Nothing is written to final/ - assembly exports there.
+"""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import numpy as np
+import pandas as pd
+import yaml
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from common import paths, palette
+
+FIG = Path(__file__).resolve().parent.name
+out = paths.fig_output(FIG)
+_cfg = yaml.safe_load((paths.ROOT / "config" / "style.yaml").read_text())
+plt.rcParams.update({
+    "font.family": _cfg["font_family"], "pdf.fonttype": 42, "svg.fonttype": "none",
+    "savefig.dpi": 600, "axes.grid": False,
+})
+def mm(x): return x / 25.4
+palette.register_colormaps()
+
+CMAP = matplotlib.colormaps["thesis_div"]
+INK = palette.INK
+LIB_C, TOP_C = CMAP(0.88), CMAP(0.12)
+
+POOL_C = palette.NEUTRAL["400"]
+
+# ------------------------------------------------------- fold coverage
+# How many of the pool's fold clusters each rule ends up holding, against what
+# an equal-sized random draw from the same pool would hold. Cluster count is
+# the diversity metric the structure-generation literature uses (Foldseek
+# clusters at TM 0.5 in Proteina and Protein FID); the random draw is the null
+# that turns a bare count into a statement, and is the same construction the
+# archived fig06_fold_diversity used.
+#
+# PARTITION WARNING. Two different clusterings in this repo are both called
+# cluster_r10. This panel uses the MAP partition (fold_map_scatter.parquet and
+# counterfactual3.csv, 139 folds in the pool), because it is the only one that
+# carries membership for both selections. inputs/fold_coverage_pool.csv is a
+# finer Leiden r1.0 partition of the passing set (732 folds) but records only
+# the library, so it cannot answer this question. Never mix the two.
+N_SIM = 300
+_c = pd.read_csv(paths.INPUTS / "counterfactual3.csv")
+_d = pd.read_parquet(paths.INPUTS / "large" / "fold_map_scatter.parquet")
+_pool = _d[(~_d.deg0) & (_d.stage >= 1)]
+POOL_BB, POOL_FOLDS = len(_pool), _pool.cluster_r10.nunique()
+_rng = np.random.default_rng(0)
+_pf = _pool.cluster_r10.values
+
+cov = {}
+for _k, _sel in (("ipTM", "top_iptm"), ("lib", "library")):
+    _bb = _c[_c.sel == _sel].drop_duplicates("struct_name")
+    _null = [len(np.unique(_rng.choice(_pf, len(_bb), replace=False)))
+             for _ in range(N_SIM)]
+    cov[_k] = dict(bb=len(_bb), folds=_bb.cluster_r10.nunique(),
+                   outside=len(set(_bb.cluster_r10) - set(_pf)),
+                   null=float(np.mean(_null)), sd=float(np.std(_null)))
+    v = cov[_k]
+    print(f"{_sel:<9} {v['bb']:>6,} of {POOL_BB:,} backbones "
+          f"({100*v['bb']/POOL_BB:.0f}%), {v['folds']:>3} of {POOL_FOLDS} folds "
+          f"({100*v['folds']/POOL_FOLDS:.0f}%); random draw of the same size "
+          f"would hold {v['null']:.0f} +/- {v['sd']:.0f} folds; "
+          f"{v['outside']} fold(s) outside the pool partition")
+
+# The null is drawn as a third bar in the fold row (Leo, 2026-11-14). It is
+# taken at the ORDERED LIBRARY's backbone count, so it answers "is 114 a lot?"
+# for the arm that was actually synthesised; the ipTM arm is smaller and its
+# own null is a few folds lower, which the caption carries. There is no random
+# bar in the backbone row: a draw of N backbones holds N backbones, so it would
+# only restate its own size.
+cov["rand"] = dict(folds=cov["lib"]["null"], sd=cov["lib"]["sd"])
+
+# ------------------------------------------------- per-stack composition
+# Canonical stack order (COLORS.md rule 2), short tick labels as the rest of
+# the deck writes them.
+STACKS = [palette.SHORT[k] for k in palette.STACK_ORDER]
+TICK = {"RFD3+LiMPNN": "RFD3", "BG+LiMPNN": "BG+LiM", "BG+BIF": "BG+BIF",
+        "BD1+LiMPNN": "BD1", "HD+LiMPNN": "HD"}
+_f = pd.read_csv(paths.INPUTS / "funnel_real_gate_v2.csv").set_index("step")
+cnt = pd.DataFrame({
+    "all": _f.loc["All designs", STACKS].astype(float),
+    "gate": _f.iloc[-1][STACKS].astype(float),
+    "ipTM": _c[_c.sel == "top_iptm"]["stack"].value_counts().reindex(STACKS),
+    "lib": _c[_c.sel == "library"]["stack"].value_counts().reindex(STACKS),
+}).astype(float)
+assert not cnt.isna().any().any(), "a stack is missing from one of the sets"
+TOT = cnt.sum().astype(int).to_dict()
+share = {k: (cnt[k] / cnt[k].sum()).values for k in cnt}
+print("per-stack share of each set (%):")
+print((100 * cnt / cnt.sum()).round(1).to_string())
+
+# ------------------------------------------------- SSE class, not drawn
+# The composition companion to b, kept as a printed check because it is the
+# obvious alternative panel and the README quotes it. Classes are the CATH
+# split: no strand at all, no helix at all, or both.
+#
+# This is also the honest form of the alpha/beta balance violin that stood
+# here until 2026-11-12. That violin was unusable: 74% of the library and 84%
+# of ipTM have zero strand, so on a (helix-strand)/(helix+strand) axis they
+# are one point mass at +1 and the smoother turns it into a wall. Binning
+# into classes puts that population in a bar, where a point mass belongs.
+sse = pd.read_csv(paths.INPUTS / "sse_arms.csv")
+ss = sse[sse.sel.isin(["library", "top_iptm"])]
+klass = np.where(ss.strand < 0.05, "all-alpha",
+                 np.where(ss.helix < 0.05, "all-beta", "alpha+beta"))
+mix = pd.crosstab(ss.sel, klass, normalize="index").mul(100).round(1)
+print("SSE class, % of each arm (not drawn):")
+print(mix.to_string())
+
+
+# =========================================================== figure
+fig = plt.figure(figsize=(mm(178), mm(100)))
+
+# --------------------------------------- b what each rule reduces
+# Two reductions side by side, as a share of the pool each rule drew from:
+# how many backbones survive, and how many distinct fold clusters they still
+# cover. The point is the gap between the two rows - a rule can keep a quarter
+# of the backbones and most of the folds, or a quarter and barely half.
+bx = fig.add_axes([0.545, 0.655, 0.430, 0.255])
+GROUPS = [("unique backbones", "bb", POOL_BB, "{:,}", False),
+          ("fold clusters", "folds", POOL_FOLDS, "{:d}", True)]
+# Arm names, used by both panels. Deliberately parallel: both arms are
+# selections of the same size from the same pool, differing only in the rule.
+# "(ordered)" marks the one that was actually synthesised, since otherwise
+# "diversity-optimised" reads as a hypothetical arm rather than the library.
+ARMS = [("ipTM-ranked 12,000", "ipTM", TOP_C),
+        ("diversity-optimised 12,000 (ordered)", "lib", LIB_C)]
+RAND = ("random draw", "rand", POOL_C)
+BH = 0.30
+# Group labels sit above their own pair, inside the axes. As y tick labels
+# they overhung the axes to the left and would collide with whatever
+# eventually fills the left column.
+_arms_of = lambda has_rand: ARMS + [RAND] if has_rand else ARMS
+_bases, _y = [], 0.0                     # built bottom-up: groups differ in height
+for g in reversed(GROUPS):
+    _bases.insert(0, _y)
+    _y += len(_arms_of(g[4])) * BH + 0.70
+for gi, (gname, key, pool_n, fmt, has_rand) in enumerate(GROUPS):
+    arms = _arms_of(has_rand)
+    base = _bases[gi]
+    bx.text(0, base + len(arms) * BH + 0.02,
+            f"{gname}, {fmt.format(pool_n)} in the pool",
+            fontsize=5.6, color=INK, ha="left", va="bottom", weight="bold")
+    for ai, (alab, akey, col) in enumerate(arms):
+        v = cov[akey][key]
+        y = base + (len(arms) - 1 - ai) * BH
+        bx.barh(y, 100 * v / pool_n, BH * 0.86, color=col, linewidth=0, zorder=2)
+        if akey == "rand":               # the null: its own label, and a +/- 1 SD whisker
+            sd = cov["rand"]["sd"]
+            bx.errorbar(100 * v / pool_n, y, xerr=100 * sd / pool_n, fmt="none",
+                        ecolor=palette.NEUTRAL["600"], elinewidth=0.6, capsize=1.3,
+                        capthick=0.6, zorder=3)
+            txt = f"{v:.0f} \u00b1 {sd:.0f} at random"
+        else:
+            txt = f"{fmt.format(v)}  ({100*v/pool_n:.0f}%)"
+        bx.text(100 * v / pool_n + (1.2 + 100 * cov['rand']['sd'] / pool_n
+                                    if akey == "rand" else 1.2), y, txt,
+                fontsize=5.4, color=col, ha="left", va="center", weight="bold")
+for side in ("top", "right", "left"):
+    bx.spines[side].set_visible(False)
+bx.spines["bottom"].set_color(palette.NEUTRAL["400"])
+bx.spines["bottom"].set_linewidth(0.6)
+bx.set_xlim(0, 118)
+bx.set_ylim(-0.22, _bases[0] + len(_arms_of(GROUPS[0][4])) * BH + 0.42)
+bx.set_yticks([])
+bx.set_xticks([0, 50, 100])
+bx.set_xticklabels(["0", "50", "100%"], fontsize=5.6,
+                   color=palette.NEUTRAL["600"])
+bx.tick_params(axis="x", length=2, width=0.6, pad=1.5,
+               color=palette.NEUTRAL["400"])
+bx.tick_params(axis="y", length=0, pad=2)
+bx.set_xlabel("kept, as a share of the pool", fontsize=5.8,
+              color=palette.NEUTRAL["600"], labelpad=1.5)
+# Key on one line ABOVE the axes: stacked inside, its second row landed on
+# the first group label.
+_kx = 0.0
+for alab, akey, col in ARMS:
+    bx.text(_kx, 1.10, "■", transform=bx.transAxes, fontsize=5.5, color=col,
+            ha="left", va="center")
+    bx.text(_kx + 0.035, 1.10, alab, transform=bx.transAxes, fontsize=5.2,
+            color=INK, ha="left", va="center")
+    _kx += 0.035 + 0.0125 * len(alab) + 0.045
+
+# ------------------------------------------- c what each rule does to the mix
+# Share of each set that comes from each stack. Shares, not counts: the three
+# sets are 6,992,515 / 11,895 / 11,623 designs, so counts would only show that
+# the campaign is big. The campaign is near flat by construction - the five
+# stacks were run to roughly equal size - so any departure from flat here is
+# the selection rule talking, not the campaign.
+#
+# Stripped on 2026-11-12: no section title, no campaign note under the axis,
+# no n= in the key. The bars, their numbers and the three names are the whole
+# panel; the counts and the campaign baseline live in the README and the
+# caption. The axes grew into the space all of that used to take.
+cx = fig.add_axes([0.545, 0.135, 0.430, 0.370])
+x = np.arange(len(STACKS))
+W = 0.27
+for i, (lab, vals, col) in enumerate([
+        ("passed the gate", 100 * share["gate"], POOL_C),
+        (ARMS[0][0], 100 * share["ipTM"], TOP_C),
+        (ARMS[1][0], 100 * share["lib"], LIB_C)]):
+    xs = x + (i - 1) * W
+    cx.bar(xs, vals, W * 0.92, color=col, linewidth=0, zorder=2)
+    for xx, v in zip(xs, vals):
+        cx.text(xx, v + 1.0, f"{v:.0f}", fontsize=4.8, color=palette.NEUTRAL["600"],
+                ha="center", va="bottom")
+    cx.text(0.44, 0.97 - i * 0.085, "■", transform=cx.transAxes, fontsize=5.5,
+            color=col, ha="left", va="center")
+    cx.text(0.475, 0.97 - i * 0.085, lab, transform=cx.transAxes, fontsize=5.2,
+            color=INK, ha="left", va="center")
+for side in ("top", "right", "left"):
+    cx.spines[side].set_visible(False)
+cx.spines["bottom"].set_color(palette.NEUTRAL["400"])
+cx.spines["bottom"].set_linewidth(0.6)
+cx.set_yticks([])
+cx.set_xticks(x)
+cx.set_xticklabels([TICK[s] for s in STACKS], fontsize=5.6, color=INK)
+cx.tick_params(length=0, pad=2)
+cx.set_xlim(-0.6, len(STACKS) - 0.4)
+cx.set_ylim(0, 56)
+cx.set_ylabel("% of the designs in each set", fontsize=5.8,
+              color=palette.NEUTRAL["600"], labelpad=2)
+
+for ext in ("svg", "pdf", "png"):
+    fig.savefig(out / f"selection_difference.{ext}", transparent=False,
+                dpi=600 if ext == "png" else None)
+plt.close(fig)
+print("->", out / "selection_difference.png")

@@ -1,0 +1,52 @@
+config_kind: multif
+config_name: default
+container:
+  boltzgen_envs:
+    HF_HOME: /cluster/work/wicky/lvalsecchi/rna_binder/_cache/boltzgen_sif/hf
+    HF_HUB_OFFLINE: '1'
+    HUGGINGFACE_HUB_CACHE: /cluster/work/wicky/lvalsecchi/rna_binder/_cache/boltzgen_sif/hf
+    MPLCONFIGDIR: /cluster/work/wicky/lvalsecchi/rna_binder/_cache/boltzgen_sif/mpl
+    TMPDIR: /cluster/work/wicky/lvalsecchi/rna_binder/_cache/boltzgen_sif/tmp
+    TRANSFORMERS_OFFLINE: '1'
+    XDG_CACHE_HOME: /cluster/work/wicky/lvalsecchi/rna_binder/_cache/boltzgen_sif/xdg
+  boltzgen_home: /cluster/work/wicky/lvalsecchi/rna_binder/_cache/boltzgen_sif/home
+  boltzgen_sif: /cluster/work/wicky/containers/boltzgen.sif
+  ligandmpnn_sif: /cluster/work/wicky/containers/LigandMPNN.sif
+  ligandmpnn_weights: /cluster/work/wicky/params/foundry/ligandmpnn_v_32_010_25.pt
+generator: boltzgen
+generator_params:
+  bg_cli:
+    diffusion_batch_size: 1
+    num_designs: 60
+    protocol: protein-anything
+  bif_cli:
+    inverse_fold_avoid: C
+    inverse_fold_num_sequences: 10
+  mpnn_cli:
+    batch_size: 10
+    chains_to_design: A
+    number_of_batches: 1
+    omit_AA: C
+    seed: 42
+    temperature: 0.1
+  spec:
+    entities:
+    - protein:
+        id: D
+        sequence: 80
+    - file:
+        include:
+        - chain:
+            id: B
+        path: csy4_rna_only.pdb
+inverse_folders:
+- boltzif
+- ligandmpnn
+slurm:
+  cpus_per_task: 4
+  gpus: rtx_4090:1
+  job_name: bg_multif
+  mem_per_cpu: 16G
+  partition: gpuhe.24h
+  time: '23:30:00'
+target_id: csy4_crrna_free

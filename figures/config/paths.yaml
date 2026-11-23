@@ -1,0 +1,5 @@
+# Paths relative to the repo root unless absolute
+inputs: inputs
+output: output
+final: final
+euler_root: /cluster/work/wicky/lvalsecchi/rna_binder

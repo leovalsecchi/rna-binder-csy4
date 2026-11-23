@@ -1,0 +1,10 @@
+d598813070bfbeae4ad848874458496f7e0802f3c07b4d9d93d373d7da643446  /cluster/work/wicky/containers/foundry_0.1.9.sif
+20dd0bc9304dbfb03a09d6e0a1f29ccca253de48defc0216594ceb3c6c35f67b  /cluster/work/wicky/containers/boltzgen.sif
+40ad0a5cfaf1b1766ca9fef02ce81d006b3c0b86622c0d606081b4c8ec615ec9  /cluster/work/wicky/containers/boltz_design1.sif
+29ffe31e4ba6032f0082fc8be54d3dbe2ed8413dbd0ea3c82c15d1f566e89366  /cluster/work/wicky/containers/LigandMPNN.sif
+f8f4b85fde692e304198fb1b2f72501ce132e894836fceacc0f2b2ef60165912  /cluster/work/wicky/containers/alphafold3.sif
+a9eae2f1000a202cac92dbf089a48e9f1437049b7b680010d4fb42b6d2fee2cb  /cluster/work/wicky/containers/boltz2.sif
+2030f2d2faa813605e40d72d2cf1c622012dec60d078f392fbaa25ede7168332  /cluster/work/wicky/containers/esmc.sif
+e8daac01e1dbd89f352910d9ec8cb872d9c96069454e4ce050434f9621adc09b  /cluster/work/wicky/containers/pyrosetta.sif
+d99eafaf8a2baae954d9d58db6ac9af138a3a07f991d33ad9cdfb7cd4fc99d2b  /cluster/work/wicky/lvalsecchi/rna_binder/containers/af3_protenix_esm.sif
+DONE

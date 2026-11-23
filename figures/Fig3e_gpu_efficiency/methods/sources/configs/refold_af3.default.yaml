@@ -1,0 +1,30 @@
+target_id: csy4_crrna_free
+config_kind: refold_af3
+config_name: default
+source_run: REQUIRED
+rna_sequence: ACUGCCGUAUAGGCAG
+slurm:
+  job_name: refold_af3
+  partition: gpuhe.4h
+  time: "04:00:00"
+  cpus_per_task: 4
+  mem_per_cpu: 8G
+  # GPU selection (supervisor-style): ALL usable >=24G cards. AF3 runs on Ampere/
+  # Ada via Triton (rtx_3090=eu-g4, rtx_4090=eu-g6) AND on the Turing 24G cards
+  # (eu-g3/eu-lo-g3: quadro_rtx_6000 + titan_rtx, sm_75) via AF3's portable xla
+  # path -- refold_af3.sh auto-picks xla when compute_cap < 80 (validated
+  # 2026-06-11: metrics match the 3090 within AF3 noise, ran faster). Excludes
+  # only the unusable cards: 11G 2080 Ti (< 24G floor) + Blackwell rtx_pro_6000
+  # (breaks AF3). All nodes verified present in gpuhe.4h. See GPU_REFOLD_COMPAT.md.
+  gpus: 1
+  gres: gpumem:24g
+  nodelist: eu-g4-[001-032],eu-g6-[001-080]   # ampere_24g (3090+4090, NO Turing) - AF3 fails exit-127 on Turing, fixed 2026-06-16
+container:
+  sif: /cluster/work/wicky/containers/alphafold3.sif
+  params_dir: /cluster/work/wicky/params/af3_params
+refolder_params:
+  num_diffusion_samples: 1   # one refold per cif (no extra AF3 samples)
+  model_seeds:
+  - 1
+  use_rna_msa: false
+  rna_msa_path: /cluster/work/wicky/lvalsecchi/rna_binder/targets/csy4_crrna_free/msa/csy4_crRNA_16nt_msa.a3m

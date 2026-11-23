@@ -1,0 +1,91 @@
+rows=139617  TOTAL_GPU_h=197796.5  sum_buckets=197796.5
+
+== stack x role (GPU-h, allocations)
+  -                                apo_selfconsistency       13603.2    8164
+  -                                other                        72.1     194
+  -                                refold_?                     34.4     403
+  -                                refold_AF3                    2.7      11
+  -                                refold_B2                     3.4      11
+  -                                refold_ESM                    1.4       5
+  -                                seed_selfconsistency         26.1      53
+  boltzdesign__ligandmpnn          generation                15792.8    2727
+  boltzdesign__ligandmpnn          refold_AF3                11022.9    6315
+  boltzdesign__ligandmpnn          refold_B2                  4259.0    3282
+  boltzdesign__ligandmpnn          refold_ESM                 3225.9    2192
+  boltzgen (BIF+LiMPNN shared)     generation                 6671.4    3302
+  boltzgen__boltzif                refold_AF3                10271.6    6338
+  boltzgen__boltzif                refold_B2                  5102.6    3608
+  boltzgen__boltzif                refold_ESM                 2354.7    1602
+  boltzgen__ligandmpnn             refold_AF3                 9432.5    6668
+  boltzgen__ligandmpnn             refold_B2                  4882.4    3233
+  boltzgen__ligandmpnn             refold_ESM                 3644.8    2337
+  halludesign__ligandmpnn          generation                68506.8   36467
+  halludesign__ligandmpnn          refold_AF3                10029.2   19409
+  halludesign__ligandmpnn          refold_B2                  3872.6   11015
+  halludesign__ligandmpnn          refold_ESM                 2167.9    5014
+  rfd3__ligandmpnn                 generation                 1798.6    3118
+  rfd3__ligandmpnn                 refold_AF3                11311.5    7891
+  rfd3__ligandmpnn                 refold_B2                  6093.0    4229
+  rfd3__ligandmpnn                 refold_ESM                 3613.0    2029
+
+== attribution method (GPU-h)
+  apo_selfconsistency    none                      13603.2
+  generation             jobname                      74.9
+  generation             path                      10153.4
+  generation             script(single-stack)      82541.3
+  other                  none                         51.5
+  other                  path                         20.6
+  refold_?               none                         34.4
+  refold_AF3             none                          2.7
+  refold_AF3             path                      51066.8
+  refold_AF3             script(single-stack)        267.3
+  refold_AF3             script(task-index)          733.5
+  refold_B2              none                          3.4
+  refold_B2              path                      24209.7
+  refold_ESM             none                          1.4
+  refold_ESM             path                      14674.8
+  refold_ESM             script(single-stack)          6.7
+  refold_ESM             script(task-index)          324.9
+  seed_selfconsistency   none                         26.1
+
+== 'other' by name (top 40)
+       12.7  hd_nsN_test
+       10.0  bash
+        8.8  bdN
+        8.3  csyN_large
+        4.0  rf_afN_scratch_test
+        3.8  afN_arraytest
+        3.7  csyN_free_xm_poc
+        3.1  run_halludesign.sh
+        2.5  agg_structural
+        1.8  csyN_medium
+        1.1  esm_wtest
+        1.1  hallu_xmodel_smoke
+        1.1  hd_resume_test
+        1.0  hd_yamltest
+        0.9  bif_exp
+        0.8  afN_batch_test
+        0.7  csyN_small
+        0.6  afN_probe
+        0.6  hd_tefix_test
+        0.5  run_halludesign_N.sh
+        0.4  hd_repro
+        0.4  rnaNseed
+        0.4  bif_expN
+        0.4  run_halludesign_aN.sh
+        0.3  agg_structural_hd
+        0.3  rfdN_csyN_N
+        0.3  agg_structural_N
+        0.2  bg_yamltest
+        0.2  run_halludesign_test.sh
+        0.2  hd_rna_target
+        0.2  csyN_testN
+        0.2  hd_randinit_test
+        0.1  natfold
+        0.1  csyN_rna
+        0.1  bif_val
+        0.1  rfdN_smoketest
+        0.1  bN_probe
+        0.1  bg_rna_smoke
+        0.1  bif_probe
+        0.1  run_halludesign_max.sh

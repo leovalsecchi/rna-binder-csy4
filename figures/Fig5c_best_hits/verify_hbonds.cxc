@@ -1,0 +1,15 @@
+open /Volumes/wicky/users/lvalsecchi/Leo_Valsecchi/LV_BinderDesign/LV_32Candidates/Q1_23_csy4free_BG_LiMPNN_len80_e8cb617b_design26_seq2.pdb
+open /Volumes/wicky/users/lvalsecchi/Leo_Valsecchi/LV_BinderDesign/LV_32Candidates/Q1_15_csy4free_BG_BIF_len80_25a69495_design18_seq0.pdb
+open /Volumes/wicky/users/lvalsecchi/Leo_Valsecchi/LV_BinderDesign/LV_32Candidates/Q1_16_csy4free_RFD3_LiMPNN_len80_73d23e78_design49_seq4.pdb
+open /Volumes/wicky/users/lvalsecchi/Leo_Valsecchi/LV_BinderDesign/LV_32Candidates/Q1_07_csy4free_BD1_LiMPNN_len80_c5072321_design5_seq1.pdb
+log text ==HBONDS==
+log text ---twist23_model2---
+hbonds #1.2/A:12,23,24 restrict #1.2/B reveal false log true
+log text ---twist15_model3---
+hbonds #2.3/A:67 restrict #2.3/B reveal false log true
+log text ---twist16_model3---
+hbonds #3.3/A:42,50 restrict #3.3/B reveal false log true
+log text ---twist07_model3---
+hbonds #4.3/A:54,53 restrict #4.3/B reveal false log true
+log save /private/tmp/claude-501/-Volumes-wicky-users-lvalsecchi-Leo-Valsecchi/925b12d8-267c-4559-a1df-2d4f76f6e864/scratchpad/hbonds_verify.html
+exit

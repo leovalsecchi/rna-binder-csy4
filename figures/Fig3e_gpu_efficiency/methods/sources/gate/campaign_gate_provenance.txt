@@ -1,0 +1,2 @@
+# binder_filter export  n=55706  store_n=6992515
+source: analyses/foldseek_map/passing_v6_final.csv (header line 2)

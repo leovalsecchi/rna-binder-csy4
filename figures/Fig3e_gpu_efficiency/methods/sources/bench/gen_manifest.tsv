@@ -1,0 +1,15 @@
+role	stack	backend	cfg	uuid8	jobid	run_dir	n_designs
+gen	rfd3_limpnn	-	configs/rfd3__multif/default.yaml	6120825b	20553140	/cluster/work/wicky/lvalsecchi/rna_binder/campaigns/csy4_crrna_free/rfd3__ligandmpnn/gpubench_v1_6120825b	
+gen	bg_shared	-	configs/boltzgen__multif/default.yaml	978e8707	20553157	/cluster/work/wicky/lvalsecchi/rna_binder/campaigns/csy4_crrna_free/boltzgen__boltzif/gpubench_v1_978e8707	
+gen	bd1_limpnn	-	configs/boltzdesign__multif/default.yaml	72b3fb2b	20553174	/cluster/work/wicky/lvalsecchi/rna_binder/campaigns/csy4_crrna_free/boltzdesign__ligandmpnn/gpubench_v1_72b3fb2b	
+gen	rfd3_limpnn	-	configs/rfd3__multif/default.yaml	f132b95d	20553193	/cluster/work/wicky/lvalsecchi/rna_binder/campaigns/csy4_crrna_free/rfd3__ligandmpnn/gpubench_v1_f132b95d	
+gen	bg_shared	-	configs/boltzgen__multif/default.yaml	029a13fa	20553274	/cluster/work/wicky/lvalsecchi/rna_binder/campaigns/csy4_crrna_free/boltzgen__boltzif/gpubench_v1_029a13fa	
+gen	bd1_limpnn	-	configs/boltzdesign__multif/default.yaml	2d213081	20553299	/cluster/work/wicky/lvalsecchi/rna_binder/campaigns/csy4_crrna_free/boltzdesign__ligandmpnn/gpubench_v1_2d213081	
+gen	hd_limpnn	-	configs/halludesign/random_init.yaml	e8724b45	20553314	/cluster/work/wicky/lvalsecchi/rna_binder/campaigns/csy4_crrna_free/halludesign__ligandmpnn/gpubench_v1_e8724b45	
+gen	hd_limpnn	-	configs/halludesign/random_init.yaml	828c688a	20553326	/cluster/work/wicky/lvalsecchi/rna_binder/campaigns/csy4_crrna_free/halludesign__ligandmpnn/gpubench_v1_828c688a	
+gen	hd_limpnn	-	configs/halludesign/random_init.yaml	d6f3d66d	20553338	/cluster/work/wicky/lvalsecchi/rna_binder/campaigns/csy4_crrna_free/halludesign__ligandmpnn/gpubench_v1_d6f3d66d	
+gen	hd_limpnn	-	configs/halludesign/random_init.yaml	9412f761	20553357	/cluster/work/wicky/lvalsecchi/rna_binder/campaigns/csy4_crrna_free/halludesign__ligandmpnn/gpubench_v1_9412f761	
+gen	hd_limpnn	-	configs/halludesign/random_init.yaml	610c17ff	20583970	/cluster/work/wicky/lvalsecchi/rna_binder/campaigns/csy4_crrna_free/halludesign__ligandmpnn/gpubench_v1_610c17ff	
+gen	rfd3_limpnn	-	configs/rfd3__multif/default.yaml	ab717c41	20640679	/cluster/work/wicky/lvalsecchi/rna_binder/campaigns/csy4_crrna_free/rfd3__ligandmpnn/gpubench_v1_ab717c41	
+gen	bg_shared	-	configs/boltzgen__multif/default.yaml	866754e2	20640689	/cluster/work/wicky/lvalsecchi/rna_binder/campaigns/csy4_crrna_free/boltzgen__boltzif/gpubench_v1_866754e2	
+gen	bd1_limpnn	-	configs/boltzdesign__multif/default.yaml	c828678c	20640707	/cluster/work/wicky/lvalsecchi/rna_binder/campaigns/csy4_crrna_free/boltzdesign__ligandmpnn/gpubench_v1_c828678c	

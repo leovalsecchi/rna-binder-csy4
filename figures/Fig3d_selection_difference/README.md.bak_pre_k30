@@ -1,0 +1,315 @@
+# Fig3d_selection_difference
+
+The difference between the two selection rules, drawn directly, instead of two
+absolute maps the reader has to subtract by eye.
+
+**State on 2026-11-12: sections b and c, both in the right column.** The
+canvas is still 178 x 100 mm and the left column is still free for whatever
+goes there.
+
+| Section | What |
+|---|---|
+| b | what each rule reduces: unique backbones and fold clusters kept |
+| c | what each rule does to the stack mix, as grouped columns |
+
+## The two arms
+Both are selections of **12,000 designs from the same candidate pool**, made
+by different rules. They are pre-selections in the same sense: neither is an
+experimental result, both are a choice of what to order.
+
+| in the figure | what it is |
+|---|---|
+| **ipTM-ranked 12,000** | the counterfactual: take the 12,000 highest ipTM designs and nothing else |
+| **diversity-optimised 12,000 (ordered)** | the rule that was actually used, maximising fold-cluster coverage; this is the library that was synthesised |
+
+Named this way, changed from "top 12,000 by ipTM" and "ordered library" on
+2026-11-12, because "ordered library" named the *outcome* and said nothing
+about the rule, which made the panel look like a comparison of a method
+against a product rather than of two rules. "(ordered)" keeps the fact that
+this arm is the real library and not a hypothetical. Both names are set once
+in `ARMS` in the script and used by both panels.
+
+Warm is the diversity-optimised arm, cool is the ipTM-ranked one.
+
+## What it shows
+
+### b, what each rule reduces
+
+Two reductions as a share of the pool each rule drew from: how many unique
+backbones survive, and how many distinct fold clusters those backbones still
+cover.
+
+| | unique backbones | | fold clusters | |
+|---|--:|--:|--:|--:|
+| pool | 26,312 | | 139 | |
+| ipTM-ranked 12,000 | 6,295 | 24% | 78 | 56% |
+| diversity-optimised 12,000 | 8,312 | 32% | 114 | 82% |
+
+The gap between the two rows is the panel. Both rules keep a similar slice of
+the backbones, a quarter against a third. They do not keep a similar slice of
+the fold space: the library holds four fifths of the pool's folds, ipTM barely
+half.
+
+**The null, computed on every rebuild but not drawn.** An equal-sized random
+draw from the same pool would hold 99 +/- 3 folds at ipTM's size and 104 +/- 4
+at the library's (300 draws). So ipTM ranking is *worse than random* at
+covering folds, about seven SD below, and the library is above its own null.
+That is the part of this panel that is not obvious, and it is currently only
+in the console and here. Add it back as a tick on the fold bars if the panel
+is ever meant to argue the point rather than report the counts.
+
+#### Three things to be careful about
+1. **Two clusterings in this repo are both called `cluster_r10`.** This panel
+   uses the MAP partition (`fold_map_scatter.parquet`, `counterfactual3.csv`),
+   139 folds in the pool, because it is the only one carrying membership for
+   both selections. `inputs/fold_coverage_pool.csv` is a finer Leiden r1.0
+   partition of the passing set, 732 folds, but records the library only. In
+   that partition the library covers ~96%, which is NOT comparable to the 82%
+   here. Never mix them.
+2. **The library's side is partly circular.** The 12k selection was built to
+   maximise cluster coverage. It ran on the k30 fold *and* epitope map while
+   this measures fold-only coverage in a different partition, so it is not
+   pure tautology, but do not caption it as a discovery. The ipTM number is
+   the one that is not circular.
+3. **346 isolate backbones are excluded** (`deg0`, degree 0 in the thresholded
+   clustering graph), so the pool is 26,312 here and 26,658 where isolates are
+   counted, as in the archived `fig06_fold_diversity`.
+
+### Which pool the selections actually came from - UNRESOLVED
+
+`counterfactual3.csv` was built from the **`all_methods.py` candidate pool**
+over `cross_campaign/filter_store_v2v9` (MANIFEST line for that file).
+`funnel_real_gate_v2.csv`, the grey bar in c, is the **`passing_v6_final`
+gate** over `filter_store_v2v9_hdtop`, which reproduces 55,706. Those are a
+different gate definition over a different store, and the campaign notes
+record that the `all_methods.py` gate yields about 66k designs rather than
+55,706.
+
+Direct evidence in the data: **2 of the 78 folds the ipTM arm holds, and 8 of
+cluster_flat's 94, do not exist in the passing partition at all.** A selection
+drawn from the 55,706 could not do that.
+
+So, until this is traced back on Euler:
+- c's grey bar is the 55,706 gate and is a legitimate reference point, but it
+  should NOT be described as the set the two selections were drawn from. An
+  earlier draft of this README said exactly that; it is corrected here.
+- b's pool (26,312 backbones, 139 folds) is the passing partition from
+  `fold_map_scatter.parquet`, which is the pool the *map* defines. The arms
+  sit almost entirely inside it, but not perfectly, for the same reason.
+
+### The partition question, settled 2026-11-16
+
+`139` is not a cut on a finer partition. It is the campaign `results_bbmap`
+partition restricted to gated non-isolate backbones: 26,658 gated minus 346
+degree-zero isolates gives 26,312, and 485 clusters minus those same 346 gives
+139, because every degree-0 node is its own singleton community. There is no
+minimum cluster size anywhere in the script, and 44 of the 139 clusters hold
+exactly one backbone.
+
+Methods 2.9 describes a DIFFERENT partition: `results_v6`, which is the sweep
+variant `results_sw_k15_f50_mut` (mutual k-NN k=15, TM floor 0.50), 31,763
+backbones in 2,166 clusters at resolution 8.0. It holds exactly the same 55,706
+passing designs. The whole difference is the dedup key:
+
+| | backbones |
+|---|---|
+| v6 structural dedup | 31,763 |
+| less coordinate splitting (1,817 backbones split 2-10 ways) | -3,311 |
+| bbmap key `<gen>_<uuid8>_<designN>`, BG unmerged | 28,452 |
+| less the BG+BIF / BG+LiMPNN merge | -1,788 |
+| bbmap key, merged (`build_bbmap/meta/build.json`) | 26,664 |
+| less 6 not in the exported parquet | -6 |
+| this panel's gated set | 26,658 |
+
+**Resolution is not the knob.** Across r0.5 to r8.0 every partition moves by
+under 10%. `k` is what matters: at TM 0.50 mutual, k=8 gives 4,538 clusters,
+k=15 gives 2,166, k=30 gives 917, k=50 gives 526. Methods 2.9 cites the
+resolution and omits k.
+
+**Coverage recomputed in the finer partitions** (isolates dropped as here, null
+size-matched to each arm, `output/Fig3d_selection_difference/fig3c_sizematched.csv`):
+
+| partition | folds | library | its null | lib delta | ipTM | its null | ipTM delta |
+|---|---|---|---|---|---|---|---|
+| bbmap (this panel) | 139 | 82.0% | 74.8% | +7.2 | 56.1% | 71.2% | -15.1 |
+| v6 r1.0 (k15) | 423 | 80.9% | 67.1% | +13.8 | 46.6% | 53.7% | -7.2 |
+| v6 r8.0 (Methods 2.9) | 600 | 86.2% | 76.5% | +9.7 | 61.5% | 66.8% | -5.3 |
+| k30 r1.0 | 147 | 94.6% | 71.8% | +22.8 | 53.7% | 60.2% | -6.5 |
+| k30 r8.0 | 256 | 96.9% | 83.6% | +13.2 | 72.3% | 76.6% | -4.3 |
+
+Both of the panel's claims survive in every partition: the library beats its
+size-matched null everywhere (+9.7 to +22.8 points) and ipTM is below its own
+null everywhere (-4.3 to -7.2). The DIRECTION is robust. The MAGNITUDES are
+not: this panel's coarse partition understates the library's margin by half and
+overstates ipTM's shortfall by two to three fold.
+
+**Why the panel nevertheless stays on bbmap.** The v6 family is built on the
+passing set only, so it holds 100% of the library arm but just 71% of the ipTM
+arm (3,479 of 11,895 ipTM designs are not in the 55,706). Scoring a full arm
+against a three-quarter arm is worse than scoring both coarsely. `results_bbmap`
+is campaign-wide and is the only partition that carries both selections whole,
+exactly as the partition warning at the top of `make_figure.py` says.
+
+VERIFY: the ordered library file is `csy4_binder_library_12k_v6_k30.csv`, which
+points at the k30 partition (917 folds at r8.0), while Methods 2.9 describes
+k15. If the library was selected on k30 and Methods documents k15, the Methods
+section describes a partition that chose nothing. The filename is suggestive,
+not proof; confirm against the selection job before this goes in print.
+
+VERIFY: 2,166 at r8.0 includes 1,566 singleton isolates; only 600 are
+multi-member communities. The same holds for k30, 917 of which 661 are
+isolates. If Methods 2.9 quotes 2,166 as a count of folds, say what fraction of
+them are single backbones.
+
+### The two attempts this replaced, and why they failed
+
+Both tried to answer fold diversity through secondary structure, and both died
+on the same fact: **74% of the library and 84% of ipTM have no beta-strand at
+all.**
+
+- **Helix content as a split violin.** Readable, but helix content cannot tell
+  a beta-rich backbone from a floppy one, because the non-helical part is
+  mostly loop either way (below 60% helix: mean 0.22 strand against 0.37 loop).
+  Its left end needed a footnote to say what it meant.
+- **Alpha/beta balance, (helix - strand) / (helix + strand).** Makes the left
+  end beta by construction, but every strand-free backbone lands on exactly
+  +1. Drawn over all designs, the smoother turns that point mass into a wall at
+  the right edge, the real distribution flattens to a sliver and both medians
+  read +1.00. Drawn over only the strand-bearing 26% / 16%, it is honest but
+  silently about a quarter of the data.
+
+The composition question itself, if it is ever wanted, belongs in **class bars**
+rather than a density, because a point mass is what a bar is for:
+
+| % of arm | all-alpha | alpha+beta | all-beta |
+|---|--:|--:|--:|
+| diversity-optimised 12,000 | 73.7 | 25.3 | 1.0 |
+| ipTM-ranked 12,000 | 83.8 | 16.0 | 0.2 |
+
+Still printed on every rebuild, not drawn.
+
+### References behind b
+- Proteina, *Scaling Flow-based Protein Structure Generative Models*
+  (arXiv 2503.00710), appendix F.1: Foldseek `easy-cluster` at TM 0.5 as the
+  diversity metric for generated backbone sets. Borrowed: cluster count as the
+  diversity statistic.
+- *Protein FID: Improved Evaluation of Protein Structure Generative Models*
+  (arXiv 2505.08041): argues designability/novelty/diversity miss how well a
+  set covers the space, and works on Foldseek cluster representatives.
+  Borrowed: coverage of an available set, rather than a bare count.
+- *Is Retrieval All You Need?* (arXiv 2608.10598): reports coverage counts at
+  topology and superfamily level across generators. Borrowed: reporting
+  coverage against a fixed reference partition.
+- `archive/unplaced_2026-11-11/code/fig06_fold_diversity` (this repo):
+  dots-not-curves, the equal-size random draw as the null, error bar on the
+  null only, and the evenness caveat.
+
+Not borrowed: rarefaction/accumulation curves, which imply a continuum of
+measurements that does not exist here (one library, one ranking), and ternary
+helix/strand/loop plots, which would put 74-84% of each arm on a single edge.
+
+### c, what each rule does to the stack mix
+
+Share of each set that comes from each generator, three columns per stack: the
+campaign gate in grey, the ipTM-ranked 12,000 in the cool state colour, the
+diversity-optimised 12,000 in the warm one.
+
+| % of the set | RFD3 | BG+LiM | BG+BIF | BD1 | HD |
+|---|---|---|---|---|---|
+| all 6,992,515 designs, in the note | 21.8 | 21.7 | 21.2 | 20.7 | 14.6 |
+| **passed the campaign gate, 55,706** | 50.1 | 26.5 | 16.2 | 5.8 | 1.4 |
+| **ipTM-ranked 12,000, n=11,895** | 46.4 | 33.8 | 15.1 | 3.2 | 1.5 |
+| **diversity-optimised 12,000, n=11,623** | 26.1 | 27.7 | 20.3 | 19.1 | 6.9 |
+
+**Shares, not counts.** The sets are 55,706 against about 11,600 designs, so
+counts would only show which is bigger.
+
+**The grey bar is the gate, not the campaign** (changed 2026-11-12). See the
+unresolved-pool note above: the gate is a legitimate reference point but is
+not established to be the exact set the two selections were drawn from.
+Against it:
+
+- Ranking on ipTM barely moves the mix at all. 50% RFD3 becomes 46%, BD1 goes
+  6% to 3%, HD stays at about 1%. It mostly keeps what the gate already chose.
+- The diversity-optimised arm is the step that moves it: BD1 6% to 19%, HD 1% to 7%,
+  RFD3 50% down to 26%. It is the only one of the three that pushes the mix
+  back towards the campaign's own spread.
+
+The campaign before the gate is near flat - the five stacks were run to roughly
+equal size - and is not in the panel at all, because against a flat baseline
+both selections look like the same big collapse and the difference between the
+two rules, which is what this figure is about, disappears. The collapse is the
+gate's doing, and the gate is one step upstream of this comparison.
+
+**The panel was stripped on 2026-11-12** to the bars, their numbers, the three
+names and the stack labels. No section title, no campaign note under the axis,
+no `n=` in the key. **So the caption has to carry what the panel no longer
+says:** the three set sizes (55,706 / 11,895 / 11,623) and, if the campaign
+baseline is wanted, its flat mix. All of it is in the table above and still
+printed to the console on every rebuild.
+
+## What changed
+### 2026-11-12
+- **The helix-content violin was replaced by this one.** Helix content cannot
+  separate a beta-rich backbone from a floppy one - the non-helical part is
+  mostly loop either way (below 60% helix: mean 0.22 strand against 0.37 loop,
+  and strand beats loop in only 14% of them), so its left end had to be
+  explained in a footnote. This axis makes the left end beta by construction.
+- **Section c added**, the grouped column chart, in the lower-right slot the
+  old per-fold ratio panel used to have.
+- The helix numbers the old section carried are still printed on a rebuild,
+  marked `[helix, not drawn]`, so the claims above can be rechecked: medians
+  0.800 library and 0.838 ipTM, and 19.4% of the library against 9.0% of ipTM
+  below 60% helix.
+
+### 2026-11-11
+- **a removed** - the map of which rule holds each backbone, over generator
+  territory outlines. With it went the `counterfactual3.csv` and
+  `fold_map_scatter.parquet` reads, the union/state classification, the
+  territory contouring and the local `blur`.
+- **c removed** - the per-fold log2 abundance ratio by dominant generator.
+- **The difference strip under the violin removed.** It carried the figure's x
+  axis, so the violin draws its own ticks and axis label now.
+- **The two halves swapped.** ipTM is the upper half, library the lower.
+
+All of it is in git history if it is wanted back; the last version with a map
+is the one committed under the old folder name `fig06d_selection_difference`.
+
+## Numbers the cut sections carried
+Kept here because they are cited elsewhere and the code that produced them is
+gone from the script.
+
+| | Backbones |
+|---|---|
+| selected by either rule | 11,559 |
+| in both | 3,048 (26%) |
+| ipTM-ranked only | 3,247 |
+| diversity-optimised only | 5,264 |
+
+Median log2 library:ipTM ratio per fold cluster, over the 64 of 139 pool folds
+holding at least 20 backbones: RFD3+LiMPNN -0.33 (16 folds), BoltzGen +1.07
+(43), BD1+LiMPNN +1.49 (2), HD+LiMPNN +1.56 (3).
+
+## Deliberate choices
+1. **No p-values anywhere.** Both arms are deterministic selections from one
+   pool. There is no sampling error to test, so a p-value would be a category
+   error. Everything here is descriptive.
+2. **Both halves of the violin share one bandwidth**, which is the thing that
+   makes the halves comparable. Density is normalised to sum to 1 per side and
+   both are scaled by the same factor.
+3. **The two violin labels sit on their own half**, not above and below the
+   whole axes, so colour is not the only thing tying a label to a density.
+
+## Rebuild
+```
+python code/Fig3d_selection_difference/make_figure.py
+```
+Reads `inputs/sse_arms.csv`, `inputs/funnel_real_gate_v2.csv` and
+`inputs/counterfactual3.csv`. No cluster job. Writes
+`output/Fig3d_selection_difference/selection_difference.{svg,pdf,png}`.
+
+## Related
+- `Fig3b_sse_cluster_map` is the source of the per-backbone secondary structure.
+- `archive/unplaced_2026-11-11/code/fig06b_selection_counterfactual` is the
+  absolute version: the pool and the two selections side by side, plus rare-fold
+  retention and per-generator enrichment.
