@@ -14,8 +14,8 @@ Fig<N><letter>_<slug>/   one panel: make_figure.py, often a README.md explaining
 Fig<N>_assembly/         composes that figure's panels onto the A4 page
 supp/<slug>/             the supplementary figures, same convention
 supp/tables/             generators for Supplementary Tables (T3-T6 are generated
-                         from primary records; T1 and T2 are transcriptions, and
-                         make_T1_T2_renderings.py renders their markdown)
+                         from primary records; T2 is a transcription rendered by
+                         make_T2_rendering.py. Table S1 is not in this archive)
 common/                  shared style: palette, glyphs, cartoon helpers, page
                          assembly, the Csy4 geometry, and paths.py
 cartoon_library/         the structural cartoons

@@ -11,11 +11,10 @@ what is not kept at all.
 | Reduced dataset | The gated design set (55,706 designs passing the five-criterion cascade), the 12,000-member ordered library, and the characterised hits with their measured values | tens of MB |
 
 The code archive is at https://github.com/leovalsecchi/rna-binder-csy4, release
-`v1.0-thesis-freeze`, archived on Zenodo under **10.5281/zenodo.24482630**
-(<https://doi.org/10.5281/zenodo.24482630>). The concept DOI 10.5281/zenodo.24482629 resolves to the
-latest version. Note that the deposited snapshot predates this sentence: a published
-Zenodo record is immutable, so the DOI is written into the repository after the fact
-and will appear in the files of any later version.
+`v1.0-thesis-freeze`, archived on Zenodo; the version DOI for that release is cited in
+the thesis's code and data availability statement. The deposited snapshot does not
+contain its own DOI: a published Zenodo record is immutable, so the DOI is written
+into the repository afterwards and appears in the files of any later version.
 
 The reduced dataset is the useful unit: it is what every figure in the chapter is drawn
 from, and it is small enough to deposit whole. The deposit carries the metric columns as

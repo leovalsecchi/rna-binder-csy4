@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Render T1 and T2 from their CSVs.
+"""Render T2 from its CSV.
 
-T3-T6 generate their .md beside their .csv; T1 and T2 are transcriptions with no
-generator, so this renders them the same way. Provenance stays out: it lives in
-T1_findings.md and T2_findings.md.
+T3-T6 generate their .md beside their .csv; T2 is a transcription with no
+generator, so this renders it the same way. Provenance stays out of the table
+file: it lives in T2_findings.md, which is not part of this archive.
 """
 import csv
 from pathlib import Path
@@ -11,17 +11,6 @@ from pathlib import Path
 OUT = Path(__file__).resolve().parent
 
 TABLES = {
-    "T1_construct_inventory": dict(
-        title="T1 - construct inventory",
-        intro=["Every plasmid built or used in this work: the entry and scaffold "
-               "plasmids, the screening plasmids, the 32 ordered candidates and the "
-               "helper plasmids used but not built here. Ordered synthesis fragments "
-               "are **not** listed; the plasmids assembled from them are.",
-               "`size_bp` is the full plasmid length throughout. Every value is "
-               "measured from the NAS DNA record, never from a journal label. Scope, "
-               "per-construct provenance and the contradictions found while building "
-               "it are in `T1_findings.md`."],
-        heads=["pART", "pLV", "Insert", "PaqCI", "BsmBI", "BsaI", "BbsI", "Size (bp)"]),
     "T2_primers": dict(
         title="T2 - primers",
         intro=["Every primer used in this work, as ordered, 5'->3'. Oligo-pool "

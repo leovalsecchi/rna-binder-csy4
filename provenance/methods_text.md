@@ -2,8 +2,8 @@
 
 Two passages for the Notion chapter. Past tense, passive, per HST guidelines 4.5.
 Placeholders in `«»` need a value before submission. As of 2026-11-23 only one is left:
-the DOI for the reduced-dataset deposit, which has not been made. The code archive's
-own DOI is 10.5281/zenodo.24482630 and is filled in below.
+the DOI for the reduced-dataset deposit, which has not been made, and the code
+archive's own DOI, minted when its release is cut.
 
 ---
 
@@ -35,7 +35,7 @@ nodelist, GRES and walltime — together with the per-job HalluDesign seed, so e
 > Pipeline source code, configuration files and the modifications applied to third-party
 > design tools were archived at the computational data freeze on 15 November 2026
 > and are available at https://github.com/leovalsecchi/rna-binder-csy4, release
-> v1.0-thesis-freeze, archived under doi:10.5281/zenodo.24482630. The archive
+> v1.0-thesis-freeze, archived under «Zenodo DOI». The archive
 > is an as-run snapshot of the production tree rather than a development history: the
 > pipeline was not under version control while the campaigns ran, and the snapshot
 > records the state of the code at the freeze. Container images, which range from 3.5 to
