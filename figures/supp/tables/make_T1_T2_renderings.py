@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Render T2 from its CSV.
+"""Render T1 and T2 from their CSVs.
 
-T3-T6 generate their .md beside their .csv; T2 is a transcription with no
-generator, so this renders it the same way. Provenance stays out of the table
-file: it lives in T2_findings.md, which is not part of this archive.
+T3-T6 generate their .md beside their .csv; T1 and T2 are transcriptions with no
+generator, so this renders them the same way. Provenance stays out of the table
+files: it lives in the findings notes, which are not part of this archive.
 """
 import csv
 from pathlib import Path
@@ -11,6 +11,20 @@ from pathlib import Path
 OUT = Path(__file__).resolve().parent
 
 TABLES = {
+    "T1_construct_inventory": dict(
+        title="T1 - construct inventory",
+        intro=["Every plasmid built or used in this work: the entry and scaffold "
+               "plasmids, the screening plasmids, the 32 ordered candidates and the "
+               "helper plasmids used but not built here. Ordered synthesis fragments "
+               "are **not** listed; the plasmids assembled from them are.",
+               "`size_bp` is the full plasmid length throughout. Every value is "
+               "measured from the DNA record rather than from a journal label.",
+               "**Eight rows are redacted.** They are vectors supplied by a "
+               "collaborator, and their designs are not ours to publish. The "
+               "identifiers are kept, because the methods name them and a reader "
+               "following a construct back to its backbone should find the row; the "
+               "insert, the length and the type IIS counts are withheld."],
+        heads=["pART", "pLV", "Insert", "PaqCI", "BsmBI", "BsaI", "BbsI", "Size (bp)"]),
     "T2_primers": dict(
         title="T2 - primers",
         intro=["Every primer used in this work, as ordered, 5'->3'. Oligo-pool "

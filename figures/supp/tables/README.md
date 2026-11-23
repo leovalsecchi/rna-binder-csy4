@@ -1,10 +1,10 @@
-# Supplementary tables T2-T6
+# Supplementary tables T1-T6
 
 Working labels only. **Supplementary numbering is not settled**, so no S-number
 appears in any filename here. Renumbering = rename the files and the caption
 entries; nothing depends on the number.
 
-⚠️ **One convention conflict to settle.** The slugs `T2_`-`T4_` were specified for
+⚠️ **One convention conflict to settle.** The slugs `T1_`-`T4_` were specified for
 this task, but `RUNLOG.md` (2026-11-19, "SM plan superseded: slugs, not
 S-numbers") sets a repo-wide rule that **numbers must not appear in any path**,
 and the sibling supplementary figures were renamed to bare slugs for exactly that
@@ -18,8 +18,9 @@ nothing reads them programmatically.
 
 Built 2026-11-19, all six complete 2026-11-23. Each table is written as both a
 machine-readable `.csv` and a `.md` rendering, by slug. T3, T4, T5 and T6 are
-**generated** from primary files by the scripts beside them; T2 is a
-transcription measured from primary records, rendered by `make_T2_rendering.py`.
+**generated** from primary files by the scripts beside them; T1 and T2 are
+transcriptions measured from primary records, rendered by
+`make_T1_T2_renderings.py`.
 
 **Each `<slug>.md` is a rendering of its `.csv` and nothing else.** Provenance -
 where a value came from, what contradicted it, what is still unverified - lives in
@@ -29,7 +30,8 @@ findings file: their generators read the primary records directly, so the script
 
 | slug | state | generator |
 |---|---|---|
-| `T2_primers` | complete - **9 rows, 9 sequences**; the last two came from the group's primer register rather than from this project tree | `make_T2_rendering.py` (`.md` only) |
+| `T1_construct_inventory` | complete - **87 plasmids**, eight of them redacted (see below); ordered synthesis fragments excluded by decision | `make_T1_T2_renderings.py` (`.md` only; the `.csv` is measured from the DNA records) |
+| `T2_primers` | complete - **9 rows, 9 sequences**; the last two came from the group's primer register rather than from this project tree | `make_T1_T2_renderings.py` (`.md` only) |
 | `T3_route_statistics` | complete and reproducing | `make_T3_route_statistics.py` |
 | `T4_container_inventory` | complete - two versions are not recorded **inside the images** and say so; the digest is their identifier | `make_T4_container_inventory.py` |
 | `T5_candidates` | **complete, no `NEED:` column** - it was listed as blocked on screen data and is not | `make_T5_candidates.py` |
@@ -350,9 +352,25 @@ because of it. Write the narrow version of the claim.
 
 ## T1 - construct inventory
 
-Supplementary Table S1, the construct inventory, is **not included in this
-archive**. Its generator is not here either. The table itself appears in the
-supplementary materials of the thesis.
+**87 plasmids**, measured from the DNA records rather than from journal labels,
+which are unreliable here. Three scope calls, settled by the author: ordered
+synthesis fragments are out (ordered DNA, not constructs), `pART255` is in although
+it was built and then dropped from the panel, and the table is scoped to this work
+rather than to the group part registry.
+
+`size_bp` is the full plasmid length throughout. The one derived value is
+`pART262`, 2,960 bp, whose only as-built record is a 795 bp insert window.
+
+**Eight rows carry `Redacted for privacy purposes`.** They are vectors supplied by a
+collaborator; the designs are theirs, not ours to publish. The identifiers stay, so
+that a reader tracing one of our constructs back to its backbone finds the row and
+knows why it stops there. The insert description, the plasmid length and the four
+type IIS counts are withheld.
+
+One check is still open and owned elsewhere: the ordered-scaffold list, the only
+thing that can confirm each `pART243`-`pART254` file name is the number that
+construct was built under. It does not block the table, since every row is measured
+from sequence.
 
 ## T2 - primers
 
