@@ -11,30 +11,30 @@ Every plasmid built or used in this work: the entry and scaffold plasmids, the s
 | pART5 | - | entry part, mNeonGreen, X2F-AGGA / X5R-TACG | 0 | 2 | 0 | 0 | 2915 |
 | pART28 | - | entry part, 5' UTR (Twist) + Kozak, X1F-AGTC / X2R-AGGA | 0 | 2 | 0 | 0 | 2278 |
 | pART29 | - | entry part, 3' UTR (Twist), X5F-TACG / X6R-GTCA | 0 | 2 | 0 | 0 | 2274 |
-| pART133 | - | entry vector (vector redacted) carrying (F30-2xCsy4Hairpin)x2 in the 3' UTR target slot, X5F-TACG / X6R-GTCA | 0 | 2 | 0 | 0 | 2506 |
-| pART155 | - | entry vector (vector redacted) carrying (F30-2xCsy4Hairpin)x3 in the 3' UTR target slot, X5F-TACG / X6R-GTCA | 0 | 2 | 0 | 0 | 2622 |
-| pART156 | - | entry vector (vector redacted) carrying (F30-2xCsy4Hairpin)x4 in the 3' UTR target slot, X5F-TACG / X6R-GTCA | 0 | 2 | 0 | 0 | 2738 |
-| pART157 | - | entry vector (vector redacted) carrying (F30-2xCsy4Hairpin)x5 in the 3' UTR target slot, X5F-TACG / X6R-GTCA | 0 | 2 | 0 | 0 | 2854 |
-| pART158 | - | entry vector (vector redacted) carrying (F30-2xCsy4Hairpin)x8 in the 3' UTR target slot, X5F-TACG / X6R-GTCA | 0 | 2 | 0 | 0 | 3202 |
+| pART133 | - | entry vector (redacted) carrying (F30-2xCsy4Hairpin)x2 in the 3' UTR target slot, X5F-TACG / X6R-GTCA | 0 | 2 | 0 | 0 | 2506 |
+| pART155 | - | entry vector (redacted) carrying (F30-2xCsy4Hairpin)x3 in the 3' UTR target slot, X5F-TACG / X6R-GTCA | 0 | 2 | 0 | 0 | 2622 |
+| pART156 | - | entry vector (redacted) carrying (F30-2xCsy4Hairpin)x4 in the 3' UTR target slot, X5F-TACG / X6R-GTCA | 0 | 2 | 0 | 0 | 2738 |
+| pART157 | - | entry vector (redacted) carrying (F30-2xCsy4Hairpin)x5 in the 3' UTR target slot, X5F-TACG / X6R-GTCA | 0 | 2 | 0 | 0 | 2854 |
+| pART158 | - | entry vector (redacted) carrying (F30-2xCsy4Hairpin)x8 in the 3' UTR target slot, X5F-TACG / X6R-GTCA | 0 | 2 | 0 | 0 | 3202 |
 | pART177 | - | ccdB-weak cassette flanked by BsmBI sites, X2F-AGGA / X3R-TTCC; the BbsI insert that installs the library cloning site in W-T4 | 0 | 2 | 0 | 2 | 2744 |
-| pART215 | - | entry vector (vector redacted) carrying (F30-2xNegCtrlLoop)x2, the spike-in negative ladder of W-T1 | 0 | 2 | 0 | 0 | 2470 |
-| pART240 | - | entry vector (vector redacted) carrying (F30-2xNegCtrlLoop)x3, the spike-in negative ladder of W-T1 | 0 | 2 | 0 | 0 | 2568 |
-| pART241 | - | entry vector (vector redacted) carrying (F30-2xNegCtrlLoop)x4, the spike-in negative ladder of W-T1 | 0 | 2 | 0 | 0 | 2666 |
-| pART242 | - | entry vector (vector redacted) carrying (F30-2xNegCtrlLoop)x6, the spike-in negative ladder of W-T1 | 0 | 2 | 0 | 0 | 2862 |
-| pART243 | - | entry vector (vector redacted) carrying the mod1 scaffold at 1 copy | 0 | 2 | 0 | 0 | 2660 |
-| pART244 | - | entry vector (vector redacted) carrying the mod1 scaffold at 2 copies | 0 | 2 | 0 | 0 | 3052 |
-| pART245 | - | entry vector (vector redacted) carrying the mod1 scaffold at 3 copies | 0 | 2 | 0 | 0 | 3444 |
-| pART246 | - | entry vector (vector redacted) carrying the mod2 scaffold at 1 copy | 0 | 2 | 0 | 0 | 2681 |
-| pART247 | - | entry vector (vector redacted) carrying the mod2 scaffold at 2 copies | 0 | 2 | 0 | 0 | 3093 |
-| pART248 | - | entry vector (vector redacted) carrying the mod2 scaffold at 3 copies | 0 | 2 | 0 | 0 | 3506 |
-| pART249 | - | entry vector (vector redacted) carrying the mod3 scaffold at 1 copy | 0 | 2 | 0 | 0 | 2706 |
-| pART250 | - | entry vector (vector redacted) carrying the mod3 scaffold at 2 copies | 0 | 2 | 0 | 0 | 3144 |
-| pART251 | - | entry vector (vector redacted) carrying the mod3 scaffold at 3 copies | 0 | 2 | 0 | 0 | 3582 |
-| pART252 | - | entry vector (vector redacted) carrying the mod4 scaffold at 1 copy | 0 | 2 | 0 | 0 | 2674 |
-| pART253 | - | entry vector (vector redacted) carrying the mod4 scaffold at 2 copies | 0 | 2 | 0 | 0 | 3079 |
-| pART254 | - | entry vector (vector redacted) carrying the mod4 scaffold at 3 copies | 0 | 2 | 0 | 0 | 3518 |
-| pART255 | - | entry vector (vector redacted) carrying the mod1 scaffold with every Csy4 site replaced by the 19 nt control loop; matched negative of pART243 | 0 | 2 | 0 | 0 | 2588 |
-| pART256 | - | entry vector (vector redacted) carrying the mod4 ring scaffold with every Csy4 site replaced by the 19 nt control loop; matched negative of pART252 | 0 | 2 | 0 | 0 | 2602 |
+| pART215 | - | entry vector (redacted) carrying (F30-2xNegCtrlLoop)x2, the spike-in negative ladder of W-T1 | 0 | 2 | 0 | 0 | 2470 |
+| pART240 | - | entry vector (redacted) carrying (F30-2xNegCtrlLoop)x3, the spike-in negative ladder of W-T1 | 0 | 2 | 0 | 0 | 2568 |
+| pART241 | - | entry vector (redacted) carrying (F30-2xNegCtrlLoop)x4, the spike-in negative ladder of W-T1 | 0 | 2 | 0 | 0 | 2666 |
+| pART242 | - | entry vector (redacted) carrying (F30-2xNegCtrlLoop)x6, the spike-in negative ladder of W-T1 | 0 | 2 | 0 | 0 | 2862 |
+| pART243 | - | entry vector (redacted) carrying the mod1 scaffold at 1 copy | 0 | 2 | 0 | 0 | 2660 |
+| pART244 | - | entry vector (redacted) carrying the mod1 scaffold at 2 copies | 0 | 2 | 0 | 0 | 3052 |
+| pART245 | - | entry vector (redacted) carrying the mod1 scaffold at 3 copies | 0 | 2 | 0 | 0 | 3444 |
+| pART246 | - | entry vector (redacted) carrying the mod2 scaffold at 1 copy | 0 | 2 | 0 | 0 | 2681 |
+| pART247 | - | entry vector (redacted) carrying the mod2 scaffold at 2 copies | 0 | 2 | 0 | 0 | 3093 |
+| pART248 | - | entry vector (redacted) carrying the mod2 scaffold at 3 copies | 0 | 2 | 0 | 0 | 3506 |
+| pART249 | - | entry vector (redacted) carrying the mod3 scaffold at 1 copy | 0 | 2 | 0 | 0 | 2706 |
+| pART250 | - | entry vector (redacted) carrying the mod3 scaffold at 2 copies | 0 | 2 | 0 | 0 | 3144 |
+| pART251 | - | entry vector (redacted) carrying the mod3 scaffold at 3 copies | 0 | 2 | 0 | 0 | 3582 |
+| pART252 | - | entry vector (redacted) carrying the mod4 scaffold at 1 copy | 0 | 2 | 0 | 0 | 2674 |
+| pART253 | - | entry vector (redacted) carrying the mod4 scaffold at 2 copies | 0 | 2 | 0 | 0 | 3079 |
+| pART254 | - | entry vector (redacted) carrying the mod4 scaffold at 3 copies | 0 | 2 | 0 | 0 | 3518 |
+| pART255 | - | entry vector (redacted) carrying the mod1 scaffold with every Csy4 site replaced by the 19 nt control loop; matched negative of pART243 | 0 | 2 | 0 | 0 | 2588 |
+| pART256 | - | entry vector (redacted) carrying the mod4 ring scaffold with every Csy4 site replaced by the 19 nt control loop; matched negative of pART252 | 0 | 2 | 0 | 0 | 2602 |
 | pART257 | - | designed eight-unit (F30-2xNegCtrlLoop)x8 negative for pART158 | 0 | 2 | 0 | 0 | 3058 |
 | pART262 | - | as-built seven-unit (F30-2xNegCtrlLoop) negative for pART158, 14 replacement loops; the clone renamed from pART257. As-built evidence is the insert record LV_Sequencing/LV1.28_NightSeq/pART262_asbuilt_7units_14loops_LV1.28.33_2026-11-22.gb (795 bp, insert only, 14 loops at 73-700, single M13 read, no backbone). Size derived, not measured: the 3,058 bp design plasmid record minus the one absent 98 nt F30 unit (design insert 893 nt, as-built 795 nt). Type IIS counts are the design plasmid's and are unchanged by the missing unit, which carries no recognition site. | 0 | 2 | 0 | 0 | 2960 |
 | pART158 | pLV001 | reporter built on a collaborator's destination vector (architecture redacted), carrying the Csy4-H29A receptor fusion and then the pART158 F30 target array | 0 | 0 | 1 | 2 | redacted |
